@@ -32,8 +32,8 @@ def get_stim_list(id=None):
 def get_stim_url(id):
     urlpath = {
             '20191119': 'https://www.dropbox.com/s/xxaat202j20kriy/logan_20191119_-20_-10_50_60_0_19_0_1.hdf5?dl=1',
-            '20191231':'https://www.dropbox.com/home/Datasets/Mitchell/stim_movies?preview=logan_20191231_-20_-10_50_60_0_19_0_1.hdf5?dl=1',
-            '20200304': 'https://www.dropbox.com/s/5tj5m2rp0wht8z2/logan_20200304_-20_-10_50_60_0_19_0_1.hdf5?raw=1',
+            '20191231':'https://www.dropbox.com/s/ulpcjfb48c6dyyf/logan_20191231_-20_-10_50_60_0_19_0_1.hdf5?dl=1',
+            '20200304': 'https://www.dropbox.com/s/5tj5m2rp0wht8z2/logan_20200304_-20_-10_50_60_0_19_0_1.hdf5?dl=1',
         }
     
     if id not in urlpath.keys():
