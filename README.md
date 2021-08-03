@@ -2,8 +2,8 @@
 Python library to access datasets in my publications
 
 ## Datasets included
-1. Mitchell Lab
-  1. Free-viewing V1 Fovea
+* Mitchell Lab
+  * Free-viewing V1 Fovea
 ## Example
 
 To get the 2D stimulus, V1 free-viewing dataset from the Mitchell lab, import the `pixel` dataset
