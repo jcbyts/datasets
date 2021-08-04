@@ -83,7 +83,6 @@ class PixelDataset(Dataset):
         stims=["Gabor"],
         downsample_s: int=1,
         downsample_t: int=2,
-        smooth_spikes=False,
         valid_eye_rad=5.2,
         valid_eye_ctr=(0.0,0.0),
         fixations_only=True,
