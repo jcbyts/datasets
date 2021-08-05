@@ -92,13 +92,19 @@ class PixelDataset(Dataset):
         cropidx=None,
         shifter=None,
         preload=False,
-        include_eyepos=False,
+        include_eyepos=True,
         include_saccades=None, # must be a dict that says how to implement the saccade basis
         include_frametime=None,
         optics=None,
-        temporal=False):
+        temporal=True,
+        flatten=True,
+        device=torch.device('cpu'),
+        dtype=torch.float32):
         
         
+        self.device = device
+        self.dtype = dtype
+
         if optics is None:
             optics = {'type': 'none', 'sigma': (0,0,0)}
 
@@ -111,6 +117,9 @@ class PixelDataset(Dataset):
         else:
             sessname = id[:chk[0]]
             spike_sorting = id[chk[0]+1:]
+        
+        if flatten: # flatten overrides temporal (which keeps a unit channel dimension)
+            temporal = False
 
         # load data
         self.dirname = dirname
@@ -119,6 +128,7 @@ class PixelDataset(Dataset):
         self.fname = get_stim_list(sessname)
         self.sdnorm = 15 # scale stimuli (puts model in better range??)
         self.stimset = stimset
+        self.flatten = flatten
 
         # check if we need to download the data
         fpath = os.path.join(self.dirname, self.fname)
@@ -163,6 +173,7 @@ class PixelDataset(Dataset):
         self.ppd = ppd
         self.NY = int(sz[0]//self.downsample_s)
         self.NX = int(sz[1]//self.downsample_s)
+        self.NF = 1 # number of channels
         self.frate = self.fhandle[self.stims[0]]['Test']['Stim'].attrs['frate'][0]
 
         # get valid indices
@@ -282,28 +293,34 @@ class PixelDataset(Dataset):
             for cc in range(self.NC):
                 cnt = bin_at_frames(st[clu==cids[cc]], ft, maxbsize=1.2/self.frate)
                 Robs[inds,cc] = cnt
-            self.y = torch.tensor(Robs.astype('float32'))
+            self.y = torch.tensor(Robs.astype('float32'), device=self.device, dtype=self.dtype)
         
         if preload: # preload data if it will fit in memory
             self.preload=False
             print("Preload True. Loading ")
             n = len(self)
-            self.x = torch.ones((n,self.num_lags,self.NY, self.NX))
+            if self.flatten:
+                self.x = torch.ones((n,self.NF*self.NY*self.NX*self.num_lags), device=self.device, dtype=self.dtype)
+            else:
+                self.x = torch.ones((n,self.NF, self.NY, self.NX, self.num_lags), device=self.device, dtype=self.dtype)
+
             if self.spike_sorting is None:
-                self.y = torch.ones((n,self.NC))
-            self.eyepos = torch.ones( (n,2))
+                self.y = torch.ones((n,self.NC), device=self.device, dtype=self.dtype)
+            self.eyepos = torch.ones( (n,2), device=self.device, dtype=self.dtype)
             chunk_size = 10000
             nsteps = n//chunk_size+1
             for i in range(nsteps):
                 print("%d/%d" %(i+1,nsteps))
                 inds = np.arange(i*chunk_size, np.minimum(i*chunk_size + chunk_size, n))
                 sample = self.__getitem__(inds)
-                self.x[inds,:,:,:] = sample['stim'].squeeze().detach().clone()
+                self.x[inds,:] = sample['stim'] #.detach().clone()
                 if self.spike_sorting is None:
-                    self.y[inds,:] = sample['robs'].detach().clone()
-                self.eyepos[inds,0] = sample['eyepos'][:,0].detach().clone()
-                self.eyepos[inds,1] = sample['eyepos'][:,1].detach().clone()
+                    self.y[inds,:] = sample['robs'] # .detach().clone()
+                self.eyepos[inds,0] = sample['eyepos'][:,0]#.detach().clone()
+                self.eyepos[inds,1] = sample['eyepos'][:,1]#.detach().clone()
             print("Done")
+            self.datafilters = torch.ones(self.y.shape, device=self.device, dtype=self.dtype)
+            self.preload = True
         self.preload = preload
 
     def __getitem__(self, index):
@@ -314,13 +331,14 @@ class PixelDataset(Dataset):
         if self.preload:
             if self.temporal:
                 if type(index)==int:
-                    stim = self.x[index,:,:,:].unsqueeze(0)
+                    stim = self.x[index,:].unsqueeze(0)
                 else:
-                    stim = self.x[index,:,:,:].unsqueeze(1)
+                    stim = self.x[index,:].unsqueeze(1) # TODO: check that implicit dimensions are handled correctly
             else:
-                stim = self.x[index,:,:,:]
+                stim = self.x[index,:]
             
-            out = {'stim': stim, 'robs': self.y[index,:], 'eyepos': self.eyepos[index,:]}
+            out = {'stim': stim, 'robs': self.y[index,:], 'eyepos': self.eyepos[index,:], 'dfs': self.datafilters[index,:]}
+
             if self.include_frametime is not None:
                 out['frametime'] = torch.tensor(self.frame_tents[index,:].astype('float32'))
 
@@ -394,7 +412,8 @@ class PixelDataset(Dataset):
                 if inisint:
                     I = np.expand_dims(I, axis=3)
                 
-                I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,3,0,1))
+                I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,0,1,3))
+                # I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,3,0,1))
                 
                 if self.spike_sorting is None:
                     if inisint:
@@ -410,12 +429,12 @@ class PixelDataset(Dataset):
 
                 # concatentate if necessary
                 if ss ==0:
-                    S = torch.tensor(self.transform_stim(I))
+                    S = torch.tensor(self.transform_stim(I), device=self.device, dtype=self.dtype)
                     if self.spike_sorting is None:
-                        Robs = torch.tensor(R.astype('float32'))
+                        Robs = torch.tensor(R, device=self.device, dtype=self.dtype)
 
                     if self.include_eyepos:
-                        ep = torch.tensor(eyepos.astype('float32'))
+                        ep = torch.tensor(eyepos, device=self.device, dtype=self.dtype)
                     else:
                         ep = None
 
@@ -425,11 +444,11 @@ class PixelDataset(Dataset):
                     #     ep = ep[0,:] #.unsqueeze(0)
 
                 else:
-                    S = torch.cat( (S, torch.tensor(self.transform_stim(I))), dim=0)
+                    S = torch.cat( (S, torch.tensor(self.transform_stim(I), device=self.device, dtype=self.dtype)), dim=0)
                     if self.spike_sorting is None:
-                        Robs = torch.cat( (Robs, torch.tensor(R.astype('float32'))), dim=0)
+                        Robs = torch.cat( (Robs, torch.tensor(R, device=self.device, dtype=self.dtype)), dim=0)
                     if self.include_eyepos:
-                        ep = torch.cat( (ep, torch.tensor(eyepos.astype('float32'))), dim=0)
+                        ep = torch.cat( (ep, torch.tensor(eyepos, device=self.device, dtype=self.dtype)), dim=0)
 
             if self.temporal:
                 if inisint:
@@ -440,7 +459,10 @@ class PixelDataset(Dataset):
             if self.spike_sorting is not None:
                 Robs = self.y[index,:]
 
-            out = {'stim': S, 'robs': Robs, 'eyepos': ep}
+            if self.flatten:
+                S = torch.flatten(S, start_dim=1)
+
+            out = {'stim': S, 'robs': Robs, 'eyepos': ep, 'dfs': torch.ones(Robs.shape, device=self.device, dtype=self.dtype)}
 
             if self.include_frametime is not None:
                 out['frametime'] = torch.tensor(self.frame_tents[index,:].astype('float32'))
@@ -490,7 +512,7 @@ class PixelDataset(Dataset):
             from scipy.ndimage import gaussian_filter
             sig = [0, self.downsample_t-1, self.downsample_s-1, self.downsample_s-1] # smoothing before downsample
             s = gaussian_filter(s, sig)
-            s = s[:,::self.downsample_t,::self.downsample_s,::self.downsample_s]
+            s = s[:,::self.downsample_s,::self.downsample_s,::self.downsample_t]
 
         if s.shape[0]==1:
             s=s[0,:,:,:] # return single item
