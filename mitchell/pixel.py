@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import Dataset
+import torch.nn.functional as F
 import numpy as np
 import h5py
 from tqdm import tqdm
@@ -22,7 +23,7 @@ def get_stim_list(id=None):
     if id is None:
         for str in list(stim_list.keys()):
             print(str)
-        return
+        return stim_list
 
     if id not in stim_list.keys():
         raise ValueError('Stimulus not found')
@@ -53,6 +54,221 @@ def download_set(sessname, fpath):
     urllib.request.urlretrieve(url, fout, reporthook)
     print("Done")
 
+class FixationMultiDataset(Dataset):
+
+    def __init__(self,
+        sess_list,
+        dirname,
+        stimset="Train",
+        requested_stims=["Gabor"],
+        downsample_s: int=1,
+        downsample_t: int=2,
+        download=True,
+        flatten=True,
+        min_fix_len: int=20,
+        valid_eye_rad=5.2):
+
+        self.dirname = dirname
+        self.stimset = stimset
+        self.requested_stims = requested_stims
+        self.downsample_s = downsample_s
+        self.downsample_t = downsample_t
+        self.spike_sorting = 'kilowf' # only one option for now
+        self.valid_eye_rad = valid_eye_rad
+        self.min_fix_len = min_fix_len
+        self.flatten = flatten
+
+        # find valid sessions
+        stim_list = get_stim_list() # list of valid sessions
+        new_sess = []
+        for sess in sess_list:
+            if sess in stim_list.keys():
+                print("Found [%s]" %sess)
+                new_sess.append(sess)
+
+        self.sess_list = new_sess # is a list of valid sessions
+        self.fnames = [get_stim_list(sess) for sess in self.sess_list] # is a list of filenames
+
+        # check if files exist. download if they don't
+        for isess,fname in enumerate(self.fnames):
+            fpath = os.path.join(dirname, fname)
+            if not os.path.exists(fpath):
+                print("File [%s] does not exist. Download set to [%s]" % (fpath, download))
+                if download:
+                    print("Downloading set...")
+                    download_set(self.sess_list[isess], dirname)
+                else:
+                    print("Download is False. Exiting...")
+
+        # open hdf5 files as a list of handles
+        self.fhandles = [h5py.File(os.path.join(dirname, fname), 'r') for fname in self.fnames]
+
+        # build index map
+        self.file_index = [] # which file the fixation corresponds to
+        self.stim_index = [] # which stimulus the fixation corresponds to
+        self.fixation_inds = [] # the actual index into the hdf5 file for this fixation
+        self.eyepos = []
+
+        self.unit_ids_orig = []
+        self.unit_id_map = []
+        self.unit_ids = []
+        self.num_units = []
+        self.NC = 0       
+
+        for f, fhandle in enumerate(self.fhandles): # loop over experimental sessions
+            
+            # store neuron ids
+            unique_units = np.unique(fhandle['Neurons'][self.spike_sorting]['cluster'][:]).astype(int)
+            self.unit_ids_orig.append(unique_units)
+            
+            # map unit ids to index into the new ids
+            mc = np.max(unique_units)+1
+            unit_map = -1*np.ones(mc, dtype=int)
+            unit_map[unique_units] = np.arange(len(unique_units))+self.NC
+            self.unit_id_map.append(unit_map)
+
+            # number of units in this session
+            self.num_units.append(len(self.unit_ids_orig[-1]))
+
+            # new unit ids
+            self.unit_ids.append(np.arange(self.num_units[-1])+self.NC)
+            self.NC += self.num_units[-1]
+
+            # loop over stimuli
+            for s, stim in enumerate(self.requested_stims): # loop over requested stimuli
+                if stim in fhandle.keys(): # if the stimuli exist in this session
+                    
+                    sz = fhandle[stim][self.stimset]['Stim'].attrs['size']
+                    self.dims = [1, int(sz[0]), int(sz[1])]
+
+                    # get fixationss
+                    labels = fhandle[stim][stimset]['labels'][:] # labeled eye positions
+                    labels = labels.flatten()
+                    labels[0] = 0 # force ends to be 0, so equal number onsets and offsets
+                    labels[-1] = 0
+                    fixations = np.diff( (labels ==  1).astype(int)) # 1 is fixation
+                    fixstart = np.where(fixations==1)[0]
+                    fixstop = np.where(fixations==-1)[0]
+
+                    nfix = len(fixstart)
+                    print("%d fixations" %nfix)
+
+                    for fix_ii in range(nfix): # loop over fixations
+                        
+                        # get the index into the hdf5 file
+                        fix_inds = np.arange(fixstart[fix_ii], fixstop[fix_ii])
+
+                        # check if the fixation meets our requirements to include
+                        # sample eye pos
+                        ppd = fhandle[stim][self.stimset]['Stim'].attrs['ppd'][0]
+                        centerpix = fhandle[stim][self.stimset]['Stim'].attrs['center'][:]
+                        eye_tmp = fhandle[stim][self.stimset]['eyeAtFrame'][1:3,fix_inds].T
+                        eye_tmp[:,0] -= centerpix[0]
+                        eye_tmp[:,1] -= centerpix[1]
+                        eye_tmp/= ppd
+
+                        if len(fix_inds) < self.min_fix_len:
+                            continue
+                        
+                        # is the eye position outside the valid region?
+                        if np.mean(np.hypot(eye_tmp[5:,0], eye_tmp[5:,1])) > self.valid_eye_rad:
+                            continue
+
+                        dx = np.diff(eye_tmp, axis=0)
+                        vel = np.hypot(dx[:,0], dx[:,1])
+                        # find missed saccades
+                        potential_saccades = np.where(vel[5:]>0.1)[0]
+                        if len(potential_saccades)>0:
+                            sacc_start = potential_saccades[0]
+                            valid = np.arange(0, sacc_start)
+                        else:
+                            valid = np.arange(0, len(fix_inds))
+                        
+                        if len(valid)>self.min_fix_len:
+                            self.fixation_inds.append(fix_inds[valid])
+                            self.file_index.append(f) # which datafile does the fixation correspond to
+                            self.stim_index.append(s) # which stimulus does the fixation correspond to
+
+    def __getitem__(self, index):
+        """
+        Get item for a Fixation dataset.
+        Each element in the index corresponds to a fixation. Each fixation will have a variable length.
+        Concatenate fixations along the batch dimension.
+
+        """
+        stim = []
+        robs = []
+        dfs = []
+        eyepos = []
+        
+
+        # handle indices (can be a range, list, int, or slice). We need to convert ints, and slices into an iterable for looping
+        if type(index) is int:
+            index = [index]
+        elif type(index) is slice:
+            index = list(range(index.start or 0, index.stop or len(self.fixation_inds), index.step or 1))
+
+        # loop over fixations
+        for ifix in index:
+            fix_inds = self.fixation_inds[ifix] # indices into file for this fixation
+            file = self.file_index[ifix]
+            stimix = self.stim_index[ifix] # stimulus index for this fixation
+
+            # sample stimulus for this fixation
+            I = self.fhandles[file][self.requested_stims[stimix]][self.stimset]['Stim'][:,:,fix_inds]
+            stim.append(torch.tensor(I, dtype=torch.float32).permute(2,0,1).unsqueeze(1))
+
+            # sample spikes
+            # NOTE: normally this would look just like the line above, but for 'Robs', but I am operating with spike times here
+            # NOTE: this is MUCH slower than just indexing into the file
+            frame_times = self.fhandles[file][self.requested_stims[stimix]][self.stimset]['frameTimesOe'][0,fix_inds]
+            spike_inds = np.where(np.logical_and(
+                self.fhandles[file]['Neurons'][self.spike_sorting]['times']>=frame_times[0],
+                self.fhandles[file]['Neurons'][self.spike_sorting]['times']<=frame_times[-1]+0.01)
+                )[1]
+
+            st = self.fhandles[file]['Neurons'][self.spike_sorting]['times'][0,spike_inds]
+            clu = self.fhandles[file]['Neurons'][self.spike_sorting]['cluster'][0,spike_inds].astype(int)
+            clu = self.unit_id_map[file][clu]
+
+
+            robs_tmp = torch.sparse_coo_tensor( (np.digitize(st, frame_times)-1, clu), np.ones(len(clu)), (len(frame_times), self.NC) , dtype=torch.float32)
+            robs_tmp = robs_tmp.to_dense()
+            robs.append(robs_tmp)
+
+            # sample datafilters
+            NCbefore = int(np.asarray(self.num_units[:file]).sum())
+            NCafter = int(np.asarray(self.num_units[file+1:]).sum())
+            dfs_tmp = torch.cat(
+                (torch.zeros( (len(frame_times), NCbefore), dtype=torch.float32),
+                torch.ones( (len(frame_times), self.num_units[file]), dtype=torch.float32),
+                torch.zeros( (len(frame_times), NCafter), dtype=torch.float32)),
+                dim=1)
+            dfs.append(dfs_tmp)
+
+            # sample eye pos
+            ppd = self.fhandles[file][self.requested_stims[stimix]][self.stimset]['Stim'].attrs['ppd'][0]
+            centerpix = self.fhandles[file][self.requested_stims[stimix]][self.stimset]['Stim'].attrs['center'][:]
+            eye_tmp = self.fhandles[file][self.requested_stims[stimix]][self.stimset]['eyeAtFrame'][1:3,fix_inds].T
+            eye_tmp[:,0] -= centerpix[0]
+            eye_tmp[:,1] -= centerpix[1]
+            eye_tmp/= ppd
+
+            eyepos.append(torch.tensor(eye_tmp, dtype=torch.float32))
+
+        # concatenate along batch dimension
+        stim = torch.cat(stim, dim=0)
+        eyepos = torch.cat(eyepos, dim=0)
+        robs = torch.cat(robs, dim=0)
+        dfs = torch.cat(dfs, dim=0)
+
+        if self.flatten:
+            stim = torch.flatten(stim, start_dim=1)
+
+        return {'stim': stim, 'robs': robs, 'dfs': dfs, 'eyepos': eyepos}
+
+    def __len__(self):
+        return len(self.fixation_inds)
 
 class PixelDataset(Dataset):
     """
