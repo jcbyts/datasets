@@ -63,6 +63,7 @@ class FixationMultiDataset(Dataset):
         requested_stims=["Gabor"],
         downsample_s: int=1,
         downsample_t: int=2,
+        num_lags: int=12,
         download=True,
         flatten=True,
         min_fix_len: int=20,
@@ -77,6 +78,8 @@ class FixationMultiDataset(Dataset):
         self.valid_eye_rad = valid_eye_rad
         self.min_fix_len = min_fix_len
         self.flatten = flatten
+        self.num_lags = num_lags
+        self.normalizing_constant = 70
 
         # find valid sessions
         stim_list = get_stim_list() # list of valid sessions
@@ -138,7 +141,7 @@ class FixationMultiDataset(Dataset):
             for s, stim in enumerate(self.requested_stims): # loop over requested stimuli
                 if stim in fhandle.keys(): # if the stimuli exist in this session
                     
-                    sz = fhandle[stim][self.stimset]['Stim'].attrs['size']
+                    sz = fhandle[stim]['Train']['Stim'].attrs['size']
                     self.dims = [1, int(sz[0]), int(sz[1])]
 
                     # get fixationss
@@ -153,10 +156,23 @@ class FixationMultiDataset(Dataset):
                     nfix = len(fixstart)
                     print("%d fixations" %nfix)
 
+                    # get valid indices
+                    # get blocks (start, stop) of valid samples
+                    blocks = fhandle[stim][stimset]['blocks'][:,:]
+                    valid_inds = []
+                    for bb in range(blocks.shape[1]):
+                        valid_inds.append(np.arange(blocks[0,bb],
+                        blocks[1,bb]))
+        
+                    valid_inds = np.concatenate(valid_inds).astype(int)
+
                     for fix_ii in range(nfix): # loop over fixations
                         
                         # get the index into the hdf5 file
-                        fix_inds = np.arange(fixstart[fix_ii], fixstop[fix_ii])
+                        fix_inds = np.arange(fixstart[fix_ii]+1, fixstop[fix_ii])
+                        fix_inds = np.intersect1d(fix_inds, valid_inds)
+                        if len(np.where(np.diff(fhandle[stim][stimset]['frameTimesOe'][0,fix_inds])>0.01)[0]) > 1:
+                            print("dropped frames. skipping")
 
                         # check if the fixation meets our requirements to include
                         # sample eye pos
@@ -180,9 +196,9 @@ class FixationMultiDataset(Dataset):
                         potential_saccades = np.where(vel[5:]>0.1)[0]
                         if len(potential_saccades)>0:
                             sacc_start = potential_saccades[0]
-                            valid = np.arange(0, sacc_start)
+                            valid = np.arange(0, sacc_start, self.downsample_t)
                         else:
-                            valid = np.arange(0, len(fix_inds))
+                            valid = np.arange(0, len(fix_inds), self.downsample_t)
                         
                         if len(valid)>self.min_fix_len:
                             self.fixation_inds.append(fix_inds[valid])
@@ -207,7 +223,6 @@ class FixationMultiDataset(Dataset):
             index = [index]
         elif type(index) is slice:
             index = list(range(index.start or 0, index.stop or len(self.fixation_inds), index.step or 1))
-
         # loop over fixations
         for ifix in index:
             fix_inds = self.fixation_inds[ifix] # indices into file for this fixation
@@ -215,7 +230,8 @@ class FixationMultiDataset(Dataset):
             stimix = self.stim_index[ifix] # stimulus index for this fixation
 
             # sample stimulus for this fixation
-            I = self.fhandles[file][self.requested_stims[stimix]][self.stimset]['Stim'][:,:,fix_inds]
+            I = self.fhandles[file][self.requested_stims[stimix]][self.stimset]['Stim'][::self.downsample_s,::self.downsample_s,fix_inds]
+            I = I.astype(np.float32)/self.normalizing_constant
             stim.append(torch.tensor(I, dtype=torch.float32).permute(2,0,1).unsqueeze(1))
 
             # sample spikes
@@ -244,6 +260,7 @@ class FixationMultiDataset(Dataset):
                 torch.ones( (len(frame_times), self.num_units[file]), dtype=torch.float32),
                 torch.zeros( (len(frame_times), NCafter), dtype=torch.float32)),
                 dim=1)
+            dfs_tmp[:self.num_lags,:] = 0 # temporal convolution will be invalid for the filter length
             dfs.append(dfs_tmp)
 
             # sample eye pos
