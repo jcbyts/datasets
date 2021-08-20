@@ -8,6 +8,11 @@ from tqdm import tqdm
 import os
 from ..utils import ensure_dir, reporthook, bin_population, bin_population_sparse, downsample_time
 
+""" Available Datasets:
+1. FixationMultiDataset - generates fixations from multiple stimulus classes 
+                        and experimental sessions. no time-embedding
+2. PixelDataset - time-embedded 2D free-viewing movies and spike trains
+"""
 def get_stim_list(id=None):
 
     stim_list = {
@@ -401,6 +406,7 @@ class PixelDataset(Dataset):
         shifter=None,
         preload=False,
         include_eyepos=True,
+        dim_order='cwht',
         include_saccades=None, # must be a dict that says how to implement the saccade basis
         include_frametime=None,
         optics=None,
@@ -437,6 +443,7 @@ class PixelDataset(Dataset):
         self.sdnorm = 15 # scale stimuli (puts model in better range??)
         self.stimset = stimset
         self.flatten = flatten
+        self.dim_order = dim_order
 
         # check if we need to download the data
         fpath = os.path.join(self.dirname, self.fname)
@@ -610,7 +617,10 @@ class PixelDataset(Dataset):
             if self.flatten:
                 self.x = torch.ones((n,self.NF*self.NY*self.NX*self.num_lags), device=self.device, dtype=self.dtype)
             else:
-                self.x = torch.ones((n,self.NF, self.NY, self.NX, self.num_lags), device=self.device, dtype=self.dtype)
+                if self.dim_order=='cxyt':
+                    self.x = torch.ones((n,self.NF, self.NY, self.NX, self.num_lags), device=self.device, dtype=self.dtype)
+                elif self.dim_order=='txy':
+                    self.x = torch.ones((n,self.num_lags, self.NY, self.NX), device=self.device, dtype=self.dtype)
 
             if self.spike_sorting is None:
                 self.y = torch.ones((n,self.NC), device=self.device, dtype=self.dtype)
@@ -720,8 +730,10 @@ class PixelDataset(Dataset):
                 if inisint:
                     I = np.expand_dims(I, axis=3)
                 
-                I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,0,1,3))
-                # I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,3,0,1))
+                if self.dim_order=='cxyt':
+                    I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,0,1,3))
+                elif self.dim_order=='txy':
+                    I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,3,0,1))
                 
                 if self.spike_sorting is None:
                     if inisint:
@@ -820,7 +832,10 @@ class PixelDataset(Dataset):
             from scipy.ndimage import gaussian_filter
             sig = [0, self.downsample_t-1, self.downsample_s-1, self.downsample_s-1] # smoothing before downsample
             s = gaussian_filter(s, sig)
-            s = s[:,::self.downsample_s,::self.downsample_s,::self.downsample_t]
+            if self.dim_order=='cxyt':
+                s = s[:,::self.downsample_s,::self.downsample_s,::self.downsample_t]
+            elif self.dim_order=='txy':
+                s = s[:,::self.downsample_t,::self.downsample_s,::self.downsample_s]
 
         if s.shape[0]==1:
             s=s[0,:,:,:] # return single item
