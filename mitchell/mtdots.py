@@ -25,7 +25,7 @@ def get_unit_ids(id=None):
 def get_stim_file(id=None):
 
     stim_list = {
-            '20190120': 'Ellie_190120_0_0_30_30_1.mat'
+            '20190120': 'Ellie_190120_0_0_30_30_2.mat'
         }
 
     if id is None:
@@ -65,11 +65,12 @@ class MTDotsDataset(Dataset):
         self.fhandle = h5py.File(os.path.join(self.dirname, self.filename), 'r')
 
         vel, Robs  = self.load_set()
-
+        
+        self.num_channels = 2 # vx, vy
+        self.vel = vel
         Xstim = create_time_embedding( vel, [self.num_lags, self.NX*self.num_channels, self.NY], tent_spacing=1)
-
-        NC = len(self.cids)
-        self.R = Robs[:,self.cids]
+        self.Xstim = torch.tensor(Xstim, dtype=torch.float32)
+        self.robs = torch.tensor(Robs, dtype=torch.float32)
     
     def __getitem__(self, index):
         stim = self.Xstim[index,:]
@@ -84,8 +85,10 @@ class MTDotsDataset(Dataset):
 
         Robs = self.fhandle['MoStimY'][:,:].T
         X = self.fhandle['MoStimX'][:,:].T
+
+        Robs = Robs[:,self.cids]
         
-        frameTime = X[:,0]
+        self.frameTime = X[:,0]
 
         # stim is NT x (NX*NY). Any non-zero value is the drift direction (as an integer) of a dot (at that spatial location)
         Stim = X[:,3:]
@@ -111,12 +114,120 @@ class MTDotsDataset(Dataset):
         self.NC = Robs.shape[1]
         self.NX = len(self.xax)
         self.NY = len(self.yax)
+        self.dbin = dbin
 
         vel = np.concatenate((dx, dy), axis=1)
         
         # weird python reshaping
         v_reshape = np.reshape(vel,[self.NT, 2, self.NX*self.NY])
-        vel = np.transpose(v_reshape, (0,2,1)).reshape((self.NT, self.NX*self.NY*2))
+        vel = v_reshape.reshape((self.NT, self.NX*self.NY*2))
+
+        # v_reshape = np.reshape(vel,[self.NT, 2, self.NX*self.NY])
+        # vel = np.transpose(v_reshape, (0,2,1)).reshape((self.NT, self.NX*self.NY*2))
 
         return vel, Robs
+    
+    def plot_tuning_curve(self, cc, amp):
 
+        import matplotlib.pyplot as plt
+        from datasets.utils import create_time_embedding
+
+        amp /= np.sum(amp)
+        mask = ((amp/np.max(amp)) > .5)
+
+        X = self.fhandle['MoStimX'][:,:].T
+        # stim is NT x (NX*NY). Any non-zero value is the drift direction (as an integer) of a dot (at that spatial location)
+        Stim = X[:,3:]
+
+        sfilt = Stim * mask.flatten()
+
+        frate = 100
+        inds = np.where(sfilt!=0)
+        ds = sfilt[inds[0],inds[1]]
+        dirs = np.unique(ds)
+
+        dstim = np.zeros( (self.NT, len(dirs)))
+        dstim[inds[0], (ds-1).astype(int)] = 1.0
+
+        dXstim = create_time_embedding(dstim, [self.num_lags, len(dirs)])
+
+        dsta = (dXstim.T@self.robs[:,cc].numpy()) / np.sum(dXstim, axis=0) * frate
+
+        I = np.reshape(dsta, (-1, self.num_lags))
+
+        dirs = dirs * self.dbin
+        tpower = np.std(I,axis=0)
+        peak_lag = np.argmax(tpower)
+
+        # bootstrap error bars
+
+        # don't sum in STA somputation (all samples preserved)
+        dsta = (dXstim * np.expand_dims(self.robs[:,cc].numpy(), axis=1)) / np.sum(dXstim, axis=0) * 100
+
+        # resample and compute confidence intervals (memory inefficient)
+        nboot = 100
+        bootinds = np.random.randint(0, high=self.NT, size=(self.NT, nboot))
+        staboot = np.sum(dsta[bootinds,:], axis=0)
+        dboot = np.reshape(staboot, (nboot, len(dirs), self.num_lags))[:,:,peak_lag]
+
+        ci = np.percentile(dboot, (2.5, 97.5), axis=0)
+
+        # fit von mises
+        import scipy.optimize as opt
+
+        tuning_curve = I[:,peak_lag]
+
+        theta = np.linspace(0, 2*np.pi, 100)
+
+        w = tuning_curve / np.sum(tuning_curve)
+        th = dirs/180*np.pi
+        mu0 = np.arctan2(np.sin(th)@w, np.cos(th)@w)
+        bw0 = 1
+        initial_guess = (mu0, bw0, np.min(tuning_curve), np.max(tuning_curve)-np.min(tuning_curve))
+        popt, pcov = opt.curve_fit(von_mises, dirs/180*np.pi, tuning_curve, p0 = initial_guess)
+
+        # plt.subplot(1,3,3)
+        plt.errorbar(dirs, tuning_curve, np.abs(ci-I[:,peak_lag]), marker='o', linestyle='none', markersize=3)
+        plt.plot(theta/np.pi*180, von_mises(theta, popt[0], popt[1], popt[2], popt[3]))
+        plt.xlabel('Direction')
+        plt.ylabel('Firing Rate (sp/s)')
+
+        plt.xticks(np.arange(0,365,90))
+
+        return {'thetas': theta/np.pi*180, 'fit': von_mises(theta, popt[0], popt[1], popt[2], popt[3]), 'dirs': dirs, 'tuning_curve': tuning_curve, 'tuning_curve_ci': np.abs(ci-I[:,peak_lag])}
+
+    def get_rf(self, wtsAll, cc):
+        
+        wtsFull = wtsAll[:,cc]
+
+        dims = [self.num_channels, self.NX, self.NY, self.num_lags]
+        wts = np.reshape(wtsFull, dims)
+
+        tpower = np.std(wts.reshape(-1,dims[-1]), axis=0)
+        peak_lag = np.argmax(tpower)
+
+        I = wts[:,:,:,peak_lag]
+
+        dx = I[0, :,:]
+        dy = I[1, :,:]
+
+        amp = np.hypot(dx, dy)
+
+        peak_space = np.where(amp==np.max(amp))
+        min_space = np.where(amp==np.min(amp))
+
+        ampnorm = amp / np.sum(amp)
+
+        muw = np.array( (dx.flatten() @ ampnorm.flatten(), dy.flatten() @ ampnorm.flatten()))
+        muw /= np.hypot(muw[0], muw[1])
+
+        tpeak =  wts[0,peak_space[0],peak_space[1],:].flatten()*muw[0] + wts[1, peak_space[0],peak_space[1],:].flatten()*muw[1]
+        tmin =  wts[0,min_space[0],min_space[1],:].flatten()*muw[0] + wts[1, min_space[0],min_space[1],:].flatten()*muw[1]
+        lags = np.arange(0, self.num_lags, 1)*1000/100
+
+        return {'dx': dx, 'dy': dy, 'amp': amp, 'tpeak': tpeak, 'tmin': tmin, 'lags': lags}
+
+def von_mises(theta, thetaPref, Bandwidth, base, amplitude):
+
+    y = base + amplitude * np.exp( Bandwidth * (np.cos(theta - thetaPref) - 1))
+    return y
