@@ -108,6 +108,125 @@ class MultiDataset(Dataset):
     def __len__(self):
         return len(self.block_inds)
 
+
+class MultiDatasetFix(Dataset):
+    """
+    MULTIDATASET-FIX can load batches from multiple datasets
+    Two changes from regular MultiDataset (above):
+    -- technical: uses now-present 'block_inds' variable
+    -- adds fixation-number-Xstim to get_item
+    Might be more clever way rather than duplicating so much code: replace?
+    -- if replace, can have a flag about whether to calc Xfix?
+    """
+
+    def __init__(self,
+        sess_list,
+        dirname, 
+        num_lags=1):
+
+        self.dirname = dirname
+        self.sess_list = sess_list
+        self.num_lags = num_lags
+
+        # get hdf5 file handles
+        self.fhandles = [h5py.File(os.path.join(dirname, sess + '.hdf5'), 'r') for sess in self.sess_list]
+
+        # build index map
+        self.file_index = [] # which file the block corresponds to
+        self.block_inds = []
+        self.fixation_number = []
+        self.unit_ids = []
+        self.num_units = []
+        self.NC = 0       
+        self.dims = []
+
+        self.num_fixations = 0
+        for f, fhandle in enumerate(self.fhandles):
+            NCfile = fhandle['robs'].shape[1]
+            self.dims.append(fhandle['stim'].shape[1])
+            self.unit_ids.append(self.NC + np.asarray(range(NCfile)))
+            self.num_units.append(NCfile)
+            self.NC += NCfile
+
+            NT = fhandle['robs'].shape[0]
+
+            #blocks = (np.sum(fhandle['dfs'][:,:], axis=1)==0).astype(np.float32)
+            #blocks[0] = 1 # set invalid first sample
+            #blocks[-1] = 1 # set invalid last sample
+
+            #blockstart = np.where(np.diff(blocks)==-1)[0]
+            #blockend = np.where(np.diff(blocks)==1)[0]
+            blockstart = fhandle['block_inds'][:,0]
+            blockend = fhandle['block_inds'][:,1]
+            nblocks = len(blockstart)
+
+            for b in range(nblocks):
+                self.file_index.append(f)
+                self.block_inds.append(np.arange(blockstart[b], blockend[b]))
+                self.fixation_number.append(b+self.num_fixations)
+
+            self.num_fixations += nblocks
+
+        self.dims = np.unique(np.asarray(self.dims)) # assumes they're all the same    
+
+    def __getitem__(self, index):
+        
+        if type(index) is int:
+            index = [index]
+        elif type(index) is slice:
+            index = list(range(index.start or 0, index.stop or len(self.block_inds), index.step or 1))
+
+        stim = []
+        robs = []
+        dfs = []
+        Xfix = []
+        for ii in index:
+            inds = self.block_inds[ii]
+            NT = len(inds)
+            f = self.file_index[ii]
+
+            """ Stim """
+            stim_tmp = torch.tensor(self.fhandles[f]['stim'][inds,:], dtype=torch.float32)
+
+            """ Spikes: needs padding so all are B x NC """ 
+            robs_tmp = torch.tensor(self.fhandles[f]['robs'][inds,:], dtype=torch.float32)
+            NCbefore = int(np.asarray(self.num_units[:f]).sum())
+            NCafter = int(np.asarray(self.num_units[f+1:]).sum())
+            robs_tmp = torch.cat(
+                (torch.zeros( (NT, NCbefore), dtype=torch.float32),
+                robs_tmp,
+                torch.zeros( (NT, NCafter), dtype=torch.float32)),
+                dim=1)
+
+            """ Datafilters: needs padding like robs """
+            dfs_tmp = torch.tensor(self.fhandles[f]['dfs'][inds,:], dtype=torch.float32)
+            dfs_tmp[:self.num_lags,:] = 0 # invalidate the filter length
+            dfs_tmp = torch.cat(
+                (torch.zeros( (NT, NCbefore), dtype=torch.float32),
+                dfs_tmp,
+                torch.zeros( (NT, NCafter), dtype=torch.float32)),
+                dim=1)
+
+            """ Fixation Xstim """
+            # Do we need fixation-Xstim or simply index for array? Let's assume Xstim
+            fix_tmp = torch.zeros( (NT, self.num_fixations), dtype=torch.float32)
+            fix_tmp[:, self.fixation_number[ii]] = 1.0
+
+            stim.append(stim_tmp)
+            robs.append(robs_tmp)
+            dfs.append(dfs_tmp)
+            Xfix.append(fix_tmp)
+
+        stim = torch.cat(stim, dim=0)
+        robs = torch.cat(robs, dim=0)
+        dfs = torch.cat(dfs, dim=0)
+        Xfix = torch.cat(Xfix, dim=0)
+
+        return {'stim': stim, 'robs': robs, 'dfs': dfs, 'Xfix': Xfix}
+
+    def __len__(self):
+        return len(self.block_inds)
+
 class MonocularDataset(Dataset):
 
     def __init__(self, sessname='expt04',
