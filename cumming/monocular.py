@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import Dataset
 import NDNT.NDNutils as NDNutils
 from ..utils import download_file, ensure_dir
+from copy import deepcopy
 import h5py
 class MultiDataset(Dataset):
     """
@@ -117,12 +118,17 @@ class MultiDatasetFix(Dataset):
     -- adds fixation-number-Xstim to get_item
     Might be more clever way rather than duplicating so much code: replace?
     -- if replace, can have a flag about whether to calc Xfix?
+
+    Constructor will take eye position, which for now is an input from data
+    generated in the session (not on disk). It should have the length size 
+    of the total number of fixations x1.
     """
 
     def __init__(self,
         sess_list,
         dirname, 
-        num_lags=1):
+        num_lags=16,
+        eyepos = None):
 
         self.dirname = dirname
         self.sess_list = sess_list
@@ -139,6 +145,7 @@ class MultiDatasetFix(Dataset):
         self.num_units = []
         self.NC = 0       
         self.dims = []
+        self.eyepos = eyepos
 
         self.num_fixations = 0
         for f, fhandle in enumerate(self.fhandles):
@@ -168,6 +175,24 @@ class MultiDatasetFix(Dataset):
             self.num_fixations += nblocks
 
         self.dims = np.unique(np.asarray(self.dims)) # assumes they're all the same    
+        if self.eyepos is not None:
+            assert len(self.eyepos) == self.num_fixations, \
+                "eyepos input should have %d fixations."%self.num_fixations
+    # END MultiDatasetFix.__init__
+
+    def shift_stim_fixation( self, stim, shift):
+        """Simple shift by integer (rounded shift) and zero padded. Assumes 
+        the stim is a full fixation, to be shifted by same amount."""
+        sh = round(shift)
+        shstim = stim.new_zeros(*stim.shape)
+        if sh < 0:
+            shstim[:, -sh:] = stim[:, :sh]
+        elif sh > 0:
+            shstim[:, :-sh] = stim[:, sh:]
+        else:
+            shstim = deepcopy(stim)
+
+        return shstim
 
     def __getitem__(self, index):
         
@@ -184,9 +209,12 @@ class MultiDatasetFix(Dataset):
             inds = self.block_inds[ii]
             NT = len(inds)
             f = self.file_index[ii]
+            fix_num = self.fixation_number[ii]
 
             """ Stim """
             stim_tmp = torch.tensor(self.fhandles[f]['stim'][inds,:], dtype=torch.float32)
+            if self.eyepos is not None:
+                stim_tmp = self.shift_stim_fixation( stim_tmp, self.eyepos[fix_num] )
 
             """ Spikes: needs padding so all are B x NC """ 
             robs_tmp = torch.tensor(self.fhandles[f]['robs'][inds,:], dtype=torch.float32)
@@ -210,7 +238,7 @@ class MultiDatasetFix(Dataset):
             """ Fixation Xstim """
             # Do we need fixation-Xstim or simply index for array? Let's assume Xstim
             fix_tmp = torch.zeros( (NT, self.num_fixations), dtype=torch.float32)
-            fix_tmp[:, self.fixation_number[ii]] = 1.0
+            fix_tmp[:, fix_num] = 1.0
 
             stim.append(stim_tmp)
             robs.append(robs_tmp)
