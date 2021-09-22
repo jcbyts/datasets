@@ -130,7 +130,7 @@ class MTDotsDataset(Dataset):
     def plot_tuning_curve(self, cc, amp):
 
         import matplotlib.pyplot as plt
-        from datasets.utils import create_time_embedding
+        from datasets.utils import create_time_embedding, r_squared
 
         amp /= np.sum(amp)
         mask = ((amp/np.max(amp)) > .5)
@@ -187,14 +187,16 @@ class MTDotsDataset(Dataset):
         popt, pcov = opt.curve_fit(von_mises, dirs/180*np.pi, tuning_curve, p0 = initial_guess)
 
         # plt.subplot(1,3,3)
-        plt.errorbar(dirs, tuning_curve, np.abs(ci-I[:,peak_lag]), marker='o', linestyle='none', markersize=3)
+        plt.errorbar(dirs, tuning_curve, np.abs(ci-I[:,peak_lag]), marker='o', linestyle='none', markersize=3, color='k')
         plt.plot(theta/np.pi*180, von_mises(theta, popt[0], popt[1], popt[2], popt[3]))
         plt.xlabel('Direction')
         plt.ylabel('Firing Rate (sp/s)')
 
         plt.xticks(np.arange(0,365,90))
+        tchat = von_mises(dirs/180*np.pi, popt[0], popt[1], popt[2], popt[3])
+        r2 = r_squared(np.expand_dims(tuning_curve, axis=1), np.expand_dims(tchat, axis=1))
 
-        return {'thetas': theta/np.pi*180, 'fit': von_mises(theta, popt[0], popt[1], popt[2], popt[3]), 'dirs': dirs, 'tuning_curve': tuning_curve, 'tuning_curve_ci': np.abs(ci-I[:,peak_lag])}
+        return {'thetas': theta/np.pi*180, 'fit': von_mises(theta, popt[0], popt[1], popt[2], popt[3]), 'dirs': dirs, 'tuning_curve': tuning_curve, 'tuning_curve_ci': np.abs(ci-I[:,peak_lag]), 'r2': r2}
 
     def get_rf(self, wtsAll, cc):
         
