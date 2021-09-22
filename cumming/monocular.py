@@ -147,6 +147,12 @@ class MultiDatasetFix(Dataset):
         self.dims = []
         self.eyepos = eyepos
         self.generate_Xfix = False
+        self.fixation_grouping = []
+
+        # Set up to store default train_, val_, test_inds
+        self.test_inds = None
+        self.val_inds = None
+        self.train_inds = None
 
         self.num_fixations = 0
         for f, fhandle in enumerate(self.fhandles):
@@ -173,12 +179,16 @@ class MultiDatasetFix(Dataset):
                 self.block_inds.append(np.arange(blockstart[b], blockend[b]))
                 self.fix_n.append(b+self.num_fixations)
 
+            self.fixation_grouping.append(np.arange(nblocks, dtype='int32')+self.num_fixations)
             self.num_fixations += nblocks
 
         self.dims = np.unique(np.asarray(self.dims)) # assumes they're all the same    
         if self.eyepos is not None:
             assert len(self.eyepos) == self.num_fixations, \
                 "eyepos input should have %d fixations."%self.num_fixations
+
+        # Develop default train, validation, and test datasets 
+        #self.crossval_setup() 
     # END MultiDatasetFix.__init__
 
     def shift_stim_fixation( self, stim, shift):
@@ -195,6 +205,53 @@ class MultiDatasetFix(Dataset):
             shstim = deepcopy(stim)
 
         return shstim
+    # END MultiDatasetFix.shift_stim_fixation
+
+    def crossval_setup(self, folds=5, random_gen=False, test_set=True):
+        """This sets the cross-validation indices up We can add featuers here. Many ways to do this
+        but will stick to some standard for now. It sets the internal indices, which can be read out
+        directly or with helper functions. Perhaps helper_functions is the best way....
+        
+        Inputs: 
+            random_gen: whether to pick random fixations for validation or uniformly distributed
+            test_set: whether to set aside first an n-fold test set, and then within the rest n-fold train/val sets
+        Outputs:
+            None: sets internal variables test_inds, train_inds, val_inds
+        """
+
+        test_fixes = []
+        tfixes = []
+        vfixes = []
+        for ee in range(len(self.fixation_grouping)):
+            fix_inds = self.fixation_grouping[ee]
+            vfix1, tfix1 = self.fold_sample(len(fix_inds), folds, random_gen=random_gen)
+            if test_set:
+                test_fixes += list(fix_inds[vfix1])
+                vfix2, tfix2 = self.fold_sample(len(tfix1), folds, random_gen=random_gen)
+                vfixes += list(fix_inds[tfix1[vfix2]])
+                tfixes += list(fix_inds[tfix1[tfix2]])
+            else:
+                vfixes += list(fix_inds[vfix1])
+                tfixes += list(fix_inds[tfix1])
+
+        self.val_inds = np.array(vfixes, dtype='int32')
+        self.train_inds = np.array(tfixes, dtype='int32')
+        if test_set:
+           self.test_inds = np.array(test_fixes, dtype='int32')
+    # END MultiDatasetFix.crossval_setup
+
+    def fold_sample( self, num_items, folds, random_gen=False):
+        """This really should be a general method not associated with self"""
+        if random_gen:
+            num_val = int(num_items/folds)
+            tmp_seq = np.random.permutation(num_items)
+            val_items = np.sort(tmp_seq[:num_val])
+            rem_items = np.sort(tmp_seq[num_val:])
+        else:
+            offset = int(folds//2)
+            val_items = np.arange(offset, num_items, folds, dtype='int32')
+            rem_items = np.delete(np.arange(num_items, dtype='int32'), val_items)
+        return val_items, rem_items
 
     def __getitem__(self, index):
         
