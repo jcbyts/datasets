@@ -234,10 +234,10 @@ class MultiDatasetFix(Dataset):
                 vfixes += list(fix_inds[vfix1])
                 tfixes += list(fix_inds[tfix1])
 
-        self.val_inds = np.array(vfixes, dtype='int32')
-        self.train_inds = np.array(tfixes, dtype='int32')
+        self.val_inds = np.array(vfixes, dtype='int64').tolist()
+        self.train_inds = np.array(tfixes, dtype='int64').tolist()
         if test_set:
-           self.test_inds = np.array(test_fixes, dtype='int32')
+           self.test_inds = np.array(test_fixes, dtype='int64').tolist()
     # END MultiDatasetFix.crossval_setup
 
     def fold_sample( self, num_items, folds, random_gen=False):
