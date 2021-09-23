@@ -241,6 +241,7 @@ class FixationMultiDataset(Dataset):
         eyepos = []
         frames = []
         sacB = []
+        fix_n = []
         
 
         # handle indices (can be a range, list, int, or slice). We need to convert ints, and slices into an iterable for looping
@@ -272,6 +273,7 @@ class FixationMultiDataset(Dataset):
             
             # append the stimulus to the list of tensors
             stim.append(I.unsqueeze(1))
+            fix_n.append(torch.ones(I.shape[0], dtype=torch.int64)*ifix)
 
             """ SPIKES """
             # NOTE: normally this would look just like the line above, but for 'Robs', but I am operating with spike times here
@@ -349,6 +351,7 @@ class FixationMultiDataset(Dataset):
 
         # concatenate along batch dimension
         stim = torch.cat(stim, dim=0)
+        fix_n = torch.cat(fix_n, dim=0)
         eyepos = torch.cat(eyepos, dim=0)
         robs = torch.cat(robs, dim=0)
         dfs = torch.cat(dfs, dim=0)
@@ -357,7 +360,7 @@ class FixationMultiDataset(Dataset):
         if self.flatten:
             stim = torch.flatten(stim, start_dim=1)
         
-        sample = {'stim': stim, 'robs': robs, 'dfs': dfs, 'eyepos': eyepos, 'frame_times': frames}
+        sample = {'stim': stim, 'robs': robs, 'dfs': dfs, 'eyepos': eyepos, 'frame_times': frames, 'fix_n': fix_n}
 
         if self.saccadeB is not None:
             sample['saccade'] = torch.cat(sacB, dim=0)
@@ -366,6 +369,31 @@ class FixationMultiDataset(Dataset):
 
     def __len__(self):
         return len(self.fixation_inds)
+
+    def get_stim_indices(self, stim_name='Gabor'):
+        if isinstance(stim_name, str):
+            stim_name = [stim_name]
+        stim_id = [i for i,s in enumerate(self.requested_stims) if s in stim_name]
+
+        indices = [i for i,s in enumerate(self.stim_index) if s in stim_id]
+        
+        return indices
+    
+    def expand_shift(self, fix_shift, fix_inds=None):
+        if fix_inds is None:
+            assert fix_shift.shape[0]==len(self), 'fix_shift not equal number of fixations. Pass in fix_inds as well.'
+            fix_inds = np.arange(len(self)) # index into all fixations
+        
+        new_shift = []
+        for i, fix in enumerate(fix_inds):
+            new_shift.append(fix_shift[i].repeat(len(self.fixation_inds[fix]), 1))
+        
+        new_shift = torch.cat(new_shift, dim=0)
+        return new_shift
+
+
+
+
 
 class PixelDataset(Dataset):
     """
