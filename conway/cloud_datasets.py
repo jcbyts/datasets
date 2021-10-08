@@ -29,7 +29,7 @@ class ColorClouds(Dataset):
     def __init__(self,
         sess_list,
         datadir, 
-        num_lags=12,
+        num_lags=10,
         include_MUs = True,
         eyepos = None):
 
@@ -38,7 +38,7 @@ class ColorClouds(Dataset):
         self.num_lags = num_lags
 
         # get hdf5 file handles
-        self.fhandles = [h5py.File(os.path.join(datadir, sess + '.hdf5'), 'r') for sess in self.sess_list]
+        self.fhandles = [h5py.File(os.path.join(datadir, sess + '.hd5'), 'r') for sess in self.sess_list]
 
         # build index map
         self.file_index = [] # which file the block corresponds to
@@ -96,7 +96,7 @@ class ColorClouds(Dataset):
                     trange = np.arange(sac_inds[b]-1, NT)
 
                 # Verify that there is some data there (rather than being a blank)
-                if np.sum(fhandle['DFs']) > 0:
+                if np.sum(fhandle['DFs'][trange[num_lags:], :]) > 0:
                     self.block_inds.append(deepcopy(trange))
                     self.fix_n.append(b+self.num_fixations)
                     fix_count += 1
