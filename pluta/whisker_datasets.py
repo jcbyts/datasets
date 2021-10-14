@@ -263,7 +263,11 @@ class WhiskerData(Dataset):
         Xphase = []
         LVin = []
         #num_dims = self.stim_dims[0]*self.stim_dims[1]*self.stim_dims[2]
-        
+        if self.train_inds is not None:
+            assert len(index) <= len(self.train_inds), 'Index list too large.'
+        else:
+            assert len(index) <= self.num_trials, 'Index list too large.'
+            
         for ii in index:
             inds = self.block_inds[ii]
             NT = len(inds)
