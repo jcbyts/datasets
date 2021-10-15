@@ -245,9 +245,9 @@ class FixationMultiDataset(Dataset):
         
 
         # handle indices (can be a range, list, int, or slice). We need to convert ints, and slices into an iterable for looping
-        if type(index) is int:
+        if isinstance(index, int) or isinstance(index, np.int64):
             index = [index]
-        elif type(index) is slice:
+        elif isinstance(index, slice):
             index = list(range(index.start or 0, index.stop or len(self.fixation_inds), index.step or 1))
         # loop over fixations
         for ifix in index:
