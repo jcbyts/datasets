@@ -33,12 +33,14 @@ class WhiskerData(Dataset):
         LVhemis = None,
         LVsmooth = 1,
         numLVlags = 1,
+        device = None,
         preload = True):
         # preload currently not implemented = False option
 
         assert preload, 'havent implemented non-preloaded. may never have to?'
         assert len(sess_list) == 1, 'Cant yet do multiple datasets.'
         self.preload = preload
+        self.device = device
         self.datadir = datadir
         self.sess_list = sess_list
         self.num_lags = num_lags
@@ -122,6 +124,11 @@ class WhiskerData(Dataset):
 
                 tr_count += 1
 
+            if self.preload and device is not None:
+                self.RobsL.to(device)
+                self.RobsR.to(device)
+                self.touches_full.to(device)
+                
             self.trial_grouping.append(np.arange(tr_count, dtype='int64')+self.num_trials)
             self.num_trials += tr_count
 
@@ -139,6 +146,9 @@ class WhiskerData(Dataset):
                 Tonset = self.touches_full[1:,ww] - self.touches_full[:-1,ww]
                 Tonset = torch.cat( (Tonset, torch.zeros(1)), axis=0 )
                 self.touches[Tonset > 0, ww] = 1.0
+
+            if device is not None:
+                self.touches.to(device)
 
             # Import RobsR and RobsL
             #self.RobsL = torch.tensor(self.fhandles[f]['RobsL'], dtype=torch.float32)
@@ -161,6 +171,8 @@ class WhiskerData(Dataset):
                     self.phase_ref[ts, 0] = torch.mean( phases[ts, :][:, wtars], axis=1 )
         
             self.Xphase = self.create_phase_design_matrix( num_bins=num_phase_bins )
+            if device is not None:
+                self.Xphase.to(device)
 
             # Process LV information initally (store in variable in memory)
             if self.LVhemis is None:
@@ -184,6 +196,8 @@ class WhiskerData(Dataset):
                             LVin_tmp, 
                             [numLVlags, LVin_tmp.shape[1], 1], tent_spacing=self.LVsmooth),
                         dtype = torch.float32)
+                if device is not None:
+                    self.LVin.to(device)
     
         if hemis == 0:
             self.NC = self.num_cells[0]
