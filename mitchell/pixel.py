@@ -60,6 +60,36 @@ def download_set(sessname, fpath):
     urllib.request.urlretrieve(url, fout, reporthook)
     print("Done")
 
+
+def shift_im(im, shift):
+        """
+        apply shifter to translate stimulus as a function of the eye position
+        im = N x C x H x W (torch.float32)
+        shift = N x 2 (torch.float32)
+        """
+        import torch.nn.functional as F
+        import torch
+        affine_trans = torch.tensor([[[1., 0., 0.], [0., 1., 0.]]])
+        sz = im.shape
+        
+        # im = torch.tensor(im[:,None,:,:].astype('float32'))
+        # im = im.permute((3,1,0,2))
+
+        aff = torch.tensor([[1,0,0],[0,1,0]])
+
+        affine_trans = shift[:,:,None]+aff[None,:,:]
+        affine_trans[:,0,0] = 1
+        affine_trans[:,0,1] = 0
+        affine_trans[:,1,0] = 0
+        affine_trans[:,1,1] = 1
+
+        n = im.shape[0]
+        grid = F.affine_grid(affine_trans, torch.Size((n, 1, sz[2], sz[3])), align_corners=False)
+
+        im2 = F.grid_sample(im, grid, align_corners=False)
+
+        return im2.detach()
+
 class FixationMultiDataset(Dataset):
 
     def __init__(self,
@@ -90,13 +120,17 @@ class FixationMultiDataset(Dataset):
         self.normalizing_constant = 70
         self.max_fix_length = max_fix_length
         self.saccade_basis = saccade_basis
+        self.shift = None # default shift to None. To provide shifts, set outside this class. Should be a list of shift values equal to size dataset.eyepos in every way
 
         if self.saccade_basis is not None:
-            if type(self.saccade_basis) is not dict or 'max_len' not in self.saccade_basis.keys():
-                self.saccade_basis['max_len'] = 40
-            if type(self.saccade_basis) is not dict or 'num' not in self.saccade_basis.keys():
-                self.saccade_basis['num'] = 15
-            self.saccadeB = np.maximum(1 - np.abs(np.expand_dims(np.asarray(np.arange(0,self.saccade_basis['max_len'])), axis=1) - np.arange(0,self.saccade_basis['max_len'],self.saccade_basis['max_len']/self.saccade_basis['num']))/self.saccade_basis['max_len']*self.saccade_basis['num'], 0)
+            if type(self.saccade_basis) is np.array:
+                self.saccadeB = self.saccade_basis
+            else:
+                if type(self.saccade_basis) is not dict or 'max_len' not in self.saccade_basis.keys():
+                    self.saccade_basis['max_len'] = 40
+                if type(self.saccade_basis) is not dict or 'num' not in self.saccade_basis.keys():
+                    self.saccade_basis['num'] = 15
+                self.saccadeB = np.maximum(1 - np.abs(np.expand_dims(np.asarray(np.arange(0,self.saccade_basis['max_len'])), axis=1) - np.arange(0,self.saccade_basis['max_len'],self.saccade_basis['max_len']/self.saccade_basis['num']))/self.saccade_basis['max_len']*self.saccade_basis['num'], 0)
         else:
             self.saccadeB = None
             
@@ -224,6 +258,7 @@ class FixationMultiDataset(Dataset):
                             valid = np.arange(0, len(fix_inds))
                         
                         if len(valid)>self.min_fix_len:
+                            self.eyepos.append(eye_tmp[valid,:])
                             self.fixation_inds.append(fix_inds[valid])
                             self.file_index.append(f) # which datafile does the fixation correspond to
                             self.stim_index.append(s) # which stimulus does the fixation correspond to
@@ -262,17 +297,22 @@ class FixationMultiDataset(Dataset):
             # bring the individual values into a more reasonable range (instead of [-127,127])
             I = I.astype(np.float32)/self.normalizing_constant
             
-            I = torch.tensor(I, dtype=torch.float32).permute(2,0,1)
+            I = torch.tensor(I, dtype=torch.float32).permute(2,0,1) # [H,W,N] -> [N,H,W]
 
             # if we need to downsample
-            if self.downsample_t>1:
+            if self.downsample_t>1: # TODO: remove in future versions
                 sz = list(I.shape)
                 I = torch.flatten(I, start_dim=1)
                 I = downsample_time(I, self.downsample_t, flipped=False)
                 I = I.reshape([-1]+sz[1:])
             
             # append the stimulus to the list of tensors
-            stim.append(I.unsqueeze(1))
+            if self.shift is not None:
+                I = shift_im(I.unsqueeze(1), self.shift[ifix])
+            else:
+                I = I.unsqueeze(1)
+            
+            stim.append(I)
             fix_n.append(torch.ones(I.shape[0], dtype=torch.int64)*ifix)
 
             """ SPIKES """
@@ -332,6 +372,9 @@ class FixationMultiDataset(Dataset):
             eye_tmp[:,0] -= centerpix[0]
             eye_tmp[:,1] -= centerpix[1]
             eye_tmp/= ppd
+
+            assert np.all(self.eyepos[ifix] == eye_tmp), 'eyepos does not match between object and file'
+            
             if self.downsample_t>1:
                 eye_tmp = downsample_time(eye_tmp, self.downsample_t, flipped=False)
 
@@ -869,6 +912,7 @@ class PixelDataset(Dataset):
             s=s[0,:,:,:] # return single item
 
         return s
+
 
     def shift_stim(self, im, eyepos):
         """
