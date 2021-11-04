@@ -100,12 +100,14 @@ class FixationMultiDataset(Dataset):
         downsample_s: int=1,
         downsample_t: int=2,
         num_lags: int=12,
+        num_lags_pre_sac: int=12,
         saccade_basis = None,
         max_fix_length: int=1000,
         download=True,
         flatten=True,
         min_fix_len: int=20,
-        valid_eye_rad=5.2):
+        valid_eye_rad=5.2,
+        verbose=True):
 
         self.dirname = dirname
         self.stimset = stimset
@@ -117,7 +119,8 @@ class FixationMultiDataset(Dataset):
         self.min_fix_len = min_fix_len
         self.flatten = flatten
         self.num_lags = num_lags
-        self.normalizing_constant = 70
+        self.num_lags_pre_sac = num_lags_pre_sac
+        self.normalizing_constant = 15
         self.max_fix_length = max_fix_length
         self.saccade_basis = saccade_basis
         self.shift = None # default shift to None. To provide shifts, set outside this class. Should be a list of shift values equal to size dataset.eyepos in every way
@@ -139,7 +142,8 @@ class FixationMultiDataset(Dataset):
         new_sess = []
         for sess in sess_list:
             if sess in stim_list.keys():
-                print("Found [%s]" %sess)
+                if verbose:
+                    print("Found [%s]" %sess)
                 new_sess.append(sess)
 
         self.sess_list = new_sess # is a list of valid sessions
@@ -207,8 +211,14 @@ class FixationMultiDataset(Dataset):
                     fixstart = np.where(fixations==1)[0]
                     fixstop = np.where(fixations==-1)[0]
 
+                    # offset to include lags before fixation onset
+                    fixstart = fixstart-self.num_lags_pre_sac
+                    fixstop = fixstop[fixstart>=0]
+                    fixstart = fixstart[fixstart>=0]
+
                     nfix = len(fixstart)
-                    print("%d fixations" %nfix)
+                    if verbose:
+                        print("%d fixations" %nfix)
 
                     # get valid indices
                     # get blocks (start, stop) of valid samples
@@ -226,7 +236,8 @@ class FixationMultiDataset(Dataset):
                         fix_inds = np.arange(fixstart[fix_ii]+1, fixstop[fix_ii])
                         fix_inds = np.intersect1d(fix_inds, valid_inds)
                         if len(np.where(np.diff(fhandle[stim][stimset]['frameTimesOe'][0,fix_inds])>0.01)[0]) > 1:
-                            print("dropped frames. skipping")
+                            if verbose:
+                                print("dropped frames. skipping %d" %fix_ii)
 
                         if len(fix_inds) > self.max_fix_length:
                             fix_inds = fix_inds[:self.max_fix_length]
@@ -241,14 +252,19 @@ class FixationMultiDataset(Dataset):
                         eye_tmp/= ppd
 
                         if len(fix_inds) < self.min_fix_len:
+                            if verbose:
+                                print("fixation too short. skipping %d" %fix_ii)
                             continue
                         
                         # is the eye position outside the valid region?
-                        if np.mean(np.hypot(eye_tmp[5:,0], eye_tmp[5:,1])) > self.valid_eye_rad:
+                        if np.mean(np.hypot(eye_tmp[(self.num_lags_pre_sac+5):,0], eye_tmp[(self.num_lags_pre_sac+5):,1])) > self.valid_eye_rad:
+                            if verbose:
+                                print("eye outside valid region. skipping %d" %fix_ii)
                             continue
 
                         dx = np.diff(eye_tmp, axis=0)
                         vel = np.hypot(dx[:,0], dx[:,1])
+                        vel[:self.num_lags_pre_sac+5] = 0
                         # find missed saccades
                         potential_saccades = np.where(vel[5:]>0.1)[0]
                         if len(potential_saccades)>0:
@@ -313,7 +329,7 @@ class FixationMultiDataset(Dataset):
                 I = I.unsqueeze(1)
             
             stim.append(I)
-            fix_n.append(torch.ones(I.shape[0], dtype=torch.int64)*ifix)
+            fix_n.append(torch.ones(I.shape[0], dtype=torch.int32)*ifix)
 
             """ SPIKES """
             # NOTE: normally this would look just like the line above, but for 'Robs', but I am operating with spike times here
