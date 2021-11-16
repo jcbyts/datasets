@@ -105,8 +105,9 @@ class FixationMultiDataset(Dataset):
         max_fix_length: int=1000,
         download=True,
         flatten=True,
-        min_fix_len: int=20,
+        min_fix_length: int=50,
         valid_eye_rad=5.2,
+        add_noise=0,
         verbose=True):
 
         self.dirname = dirname
@@ -116,7 +117,7 @@ class FixationMultiDataset(Dataset):
         self.downsample_t = downsample_t
         self.spike_sorting = 'kilowf' # only one option for now
         self.valid_eye_rad = valid_eye_rad
-        self.min_fix_len = min_fix_len
+        self.min_fix_length = min_fix_length
         self.flatten = flatten
         self.num_lags = num_lags
         self.num_lags_pre_sac = num_lags_pre_sac
@@ -124,6 +125,7 @@ class FixationMultiDataset(Dataset):
         self.max_fix_length = max_fix_length
         self.saccade_basis = saccade_basis
         self.shift = None # default shift to None. To provide shifts, set outside this class. Should be a list of shift values equal to size dataset.eyepos in every way
+        self.add_noise = add_noise
 
         if self.saccade_basis is not None:
             if type(self.saccade_basis) is np.array:
@@ -174,6 +176,8 @@ class FixationMultiDataset(Dataset):
         self.unit_ids = []
         self.num_units = []
         self.NC = 0       
+        self.time_start = 0
+        self.time_stop = 0
 
         for f, fhandle in enumerate(self.fhandles): # loop over experimental sessions
             
@@ -251,7 +255,7 @@ class FixationMultiDataset(Dataset):
                         eye_tmp[:,1] -= centerpix[1]
                         eye_tmp/= ppd
 
-                        if len(fix_inds) < self.min_fix_len:
+                        if len(fix_inds) < self.min_fix_length:
                             if verbose:
                                 print("fixation too short. skipping %d" %fix_ii)
                             continue
@@ -273,7 +277,7 @@ class FixationMultiDataset(Dataset):
                         else:
                             valid = np.arange(0, len(fix_inds))
                         
-                        if len(valid)>self.min_fix_len:
+                        if len(valid)>self.min_fix_length:
                             self.eyepos.append(eye_tmp[valid,:])
                             self.fixation_inds.append(fix_inds[valid])
                             self.file_index.append(f) # which datafile does the fixation correspond to
@@ -315,6 +319,9 @@ class FixationMultiDataset(Dataset):
             
             I = torch.tensor(I, dtype=torch.float32).permute(2,0,1) # [H,W,N] -> [N,H,W]
 
+            if self.add_noise>0:
+                I += torch.randn(I.shape)*self.add_noise
+
             # if we need to downsample
             if self.downsample_t>1: # TODO: remove in future versions
                 sz = list(I.shape)
@@ -329,7 +336,7 @@ class FixationMultiDataset(Dataset):
                 I = I.unsqueeze(1)
             
             stim.append(I)
-            fix_n.append(torch.ones(I.shape[0], dtype=torch.int32)*ifix)
+            fix_n.append(torch.ones(I.shape[0], dtype=torch.int64)*ifix)
 
             """ SPIKES """
             # NOTE: normally this would look just like the line above, but for 'Robs', but I am operating with spike times here
@@ -339,7 +346,7 @@ class FixationMultiDataset(Dataset):
             if self.downsample_t>1:
                 frame_times = downsample_time(frame_times, self.downsample_t, flipped=False)
 
-            frames.append(torch.tensor(frame_times))
+            frames.append(torch.tensor(frame_times, dtype=torch.float32))
             frame_times = frame_times.flatten()
 
             spike_inds = np.where(np.logical_and(
@@ -362,7 +369,8 @@ class FixationMultiDataset(Dataset):
             # if self.downsample_t>1:
             #     robs_tmp = downsample_time(robs_tmp, self.downsample_t, flipped=False)
 
-            robs_tmp = torch.sparse_coo_tensor( (np.digitize(st, frame_times)-1, clu), np.ones(len(clu)), (len(frame_times), self.NC) , dtype=torch.float32)
+            robs_tmp = torch.sparse_coo_tensor( np.asarray([np.digitize(st, frame_times)-1, clu]),
+                 np.ones(len(clu)), (len(frame_times), self.NC) , dtype=torch.float32)
             robs_tmp = robs_tmp.to_dense()
             robs.append(robs_tmp)
 
@@ -493,7 +501,7 @@ class PixelDataset(Dataset):
         shifter=None,
         preload=False,
         include_eyepos=True,
-        dim_order='cwht',
+        dim_order='chwt',
         include_saccades=None, # must be a dict that says how to implement the saccade basis
         include_frametime=None,
         optics=None,
@@ -746,7 +754,8 @@ class PixelDataset(Dataset):
 
             if self.include_frametime is not None:
                 out['frametime'] = torch.tensor(self.frame_tents[index,:].astype('float32'))
-
+                out['frame_times'] = torch.Tensor(self.frame_time[index,None].astype('float32'))
+            
             if self.include_saccades is not None:
                 for ii in range(len(self.saccade_times)):
                     out[self.include_saccades[ii]['name']] = torch.tensor(self.saccade_times[ii][index,:].astype('float32'))
@@ -814,14 +823,21 @@ class PixelDataset(Dataset):
                     eyepos/= self.ppd
 
                 sz = I.shape
+                
                 if inisint:
                     I = np.expand_dims(I, axis=3)
-                
-                if self.dim_order=='cxyt':
-                    I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,0,1,3))
-                elif self.dim_order=='txy':
-                    I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t).transpose((2,3,0,1))
-                
+
+                # expand time dimension to native H x W x B x T
+                I = I[:,:,ufinverse].reshape(sz[0],sz[1],-1, self.num_lags*self.downsample_t)
+
+                # move batch dimension into 0th spot and re-order the remaining dims
+                if 'hwt' in self.dim_order:
+                    I = I.transpose((2,0,1,3))
+                elif 'thw' in self.dim_order:
+                    I = I.transpose((2,3,0,1))
+                else:
+                    raise ValueError('PixelDataset: Unknown dim_order, must be thw or hwt')
+
                 if self.spike_sorting is None:
                     if inisint:
                         NumC = len(R)
@@ -873,6 +889,7 @@ class PixelDataset(Dataset):
 
             if self.include_frametime is not None:
                 out['frametime'] = torch.tensor(self.frame_tents[index,:].astype('float32'))
+                out['frame_times'] = torch.Tensor(self.frame_time[index,None].astype('float32'))
             
             if self.include_saccades is not None:
                 for ii in range(len(self.saccade_times)):
@@ -917,12 +934,20 @@ class PixelDataset(Dataset):
 
         if self.downsample_t>1 or self.downsample_s>1:
             from scipy.ndimage import gaussian_filter
-            sig = [0, self.downsample_t-1, self.downsample_s-1, self.downsample_s-1] # smoothing before downsample
-            s = gaussian_filter(s, sig)
-            if self.dim_order=='cxyt':
+            
+            if 'hwt' in self.dim_order:
+                sig = [0, self.downsample_s-1, self.downsample_s-1, self.downsample_t-1] # smoothing before downsample
+                s = gaussian_filter(s, sig)
                 s = s[:,::self.downsample_s,::self.downsample_s,::self.downsample_t]
-            elif self.dim_order=='txy':
+            elif 'thw' in self.dim_order:
+                sig = [0, self.downsample_t-1, self.downsample_s-1, self.downsample_s-1] # smoothing before downsample
+                s = gaussian_filter(s, sig)
                 s = s[:,::self.downsample_t,::self.downsample_s,::self.downsample_s]
+            else:
+                raise ValueError('PixelDataset: Unknown dim_order, must be thw or hwt')
+
+        if 'c' == self.dim_order[0]:
+            s = np.expand_dims(s, axis=1)
 
         if s.shape[0]==1:
             s=s[0,:,:,:] # return single item
