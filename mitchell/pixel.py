@@ -883,7 +883,10 @@ class PixelDataset(Dataset):
                 Robs = self.y[index,:]
 
             if self.flatten:
-                S = torch.flatten(S, start_dim=1)
+                if inisint:
+                    S = torch.flatten(S, start_dim=0)
+                else:
+                    S = torch.flatten(S, start_dim=1)
 
             out = {'stim': S, 'robs': Robs, 'eyepos': ep, 'dfs': torch.ones(Robs.shape, device=self.device, dtype=self.dtype)}
 
