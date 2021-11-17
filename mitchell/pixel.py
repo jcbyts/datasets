@@ -459,6 +459,92 @@ class FixationMultiDataset(Dataset):
         return new_shift
 
 
+class Pixel(Dataset):
+    
+    def __init__(self,
+        dirname,
+        sess_list:list=None,
+        stimset:str="Train",
+        requested_stims:list=["Gabor"],
+        num_lags:int=12,
+        cids:list=None,
+        flatten:bool=False,
+        dim_order:str='cwht',
+        verbose=False,
+        download=False,
+    ):
+
+        super().__init__()
+
+        self.stimset = stimset
+        self.requested_stims = requested_stims
+        self.spike_sorting = 'kilowf' # only one option for now
+        self.num_lags = num_lags
+
+        # find valid sessions
+        stim_list = get_stim_list() # list of valid sessions
+        new_sess = []
+        for sess in sess_list:
+            if sess in stim_list.keys():
+                if verbose:
+                    print("Found [%s]" %sess)
+                new_sess.append(sess)
+
+        self.dirname = dirname
+        self.sess_list = new_sess # is a list of valid sessions
+        self.fnames = [get_stim_list(sess) for sess in self.sess_list] # is a list of filenames
+        self.download_stim_files(download) # download the files
+        # open hdf5 files as a list of handles
+        self.fhandles = {sess: h5py.File(os.path.join(dirname, get_stim_list(sess)), 'r') for sess in self.sess_list}
+
+        runninglength = 0
+
+
+        self.inds = {}
+        for expt in self.sess_list:
+            self.inds[expt] = {}
+            for stim in self.requested_stims:
+                if stim not in self.fhandles[expt].keys():
+                    self.inds[expt][stim] = {stimset: {'start': -1, 'end': -1, 'valid': None}}
+                    continue
+                valid = list(range(0,self.fhandles[expt][stim][stimset]['Stim'].shape[-1]))
+                self.inds[expt][stim] = {stimset: {'start': runninglength, 'end': runninglength+len(valid), 'valid': valid}}
+                runninglength += len(valid)
+        
+        self.num_samples = runninglength
+
+
+    def download_stim_files(self, download=True):
+        if not download:
+            return
+
+        # check if files exist. download if they don't
+        for isess,fname in enumerate(self.fnames):
+            fpath = os.path.join(self.dirname, fname)
+            if not os.path.exists(fpath):
+                print("File [%s] does not exist. Download set to [%s]" % (fpath, download))
+                if download:
+                    print("Downloading set...")
+                    download_set(self.sess_list[isess], self.dirname)
+                else:
+                    print("Download is False. Exiting...")
+
+    def __len__(self):
+        return self.num_samples
+    
+    def __getitem__(self, idx):
+        
+
+        for expt in self.sess_list:
+            for stim in self.requested_stims:
+                if idx >= self.inds[expt][stim][self.stimset]['start'] and idx <= self.inds[expt][stim][self.stimset]['end']:
+                    fidx = self.inds[expt][stim][self.stimset]['valid'][idx - self.inds[expt][stim][self.stimset]['start']]
+                    break
+
+        s = self.fhandles[expt][stim][self.stimset]['Stim'][..., fidx-self.num_lags : fidx]
+        r = self.fhandles[expt][stim][self.stimset]['Robs'][..., fidx]
+
+        return {'stim': torch.Tensor(s.astype('float32')).unsqueeze(0), 'robs': torch.Tensor(r.astype('float32'))}
 
 
 
