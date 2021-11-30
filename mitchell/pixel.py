@@ -13,7 +13,7 @@ from ..utils import ensure_dir, reporthook, bin_population, bin_population_spars
                         and experimental sessions. no time-embedding
 2. PixelDataset - time-embedded 2D free-viewing movies and spike trains
 """
-def get_stim_list(id=None):
+def get_stim_list(id=None, verbose=False):
 
     stim_list = {
             '20191119': 'logan_20191119_-20_-10_50_60_0_19_0_1.hdf5',
@@ -28,7 +28,8 @@ def get_stim_list(id=None):
 
     if id is None:
         for str in list(stim_list.keys()):
-            print(str)
+            if verbose:
+                print(str)
         return stim_list
 
     if id not in stim_list.keys():
@@ -470,6 +471,9 @@ class Pixel(Dataset):
         cids:list=None,
         flatten:bool=False,
         dim_order:str='cwht',
+        fixations_only:bool=False,
+        valid_eye_rad:float=5.2,
+        downsample_t:int=1,
         verbose=False,
         download=False,
     ):
@@ -480,6 +484,10 @@ class Pixel(Dataset):
         self.requested_stims = requested_stims
         self.spike_sorting = 'kilowf' # only one option for now
         self.num_lags = num_lags
+
+        self.fixations_only = fixations_only
+        self.valid_eye_rad = False
+        self.downsample_t = downsample_t
 
         # find valid sessions
         stim_list = get_stim_list() # list of valid sessions
@@ -498,20 +506,122 @@ class Pixel(Dataset):
         self.fhandles = {sess: h5py.File(os.path.join(dirname, get_stim_list(sess)), 'r') for sess in self.sess_list}
 
         runninglength = 0
+        self.dims = [1, 0, 0]
+        self.NC = 0
 
+        self.valid_idx = []
 
-        self.inds = {}
-        for expt in self.sess_list:
-            self.inds[expt] = {}
-            for stim in self.requested_stims:
-                if stim not in self.fhandles[expt].keys():
-                    self.inds[expt][stim] = {stimset: {'start': -1, 'end': -1, 'valid': None}}
-                    continue
-                valid = list(range(0,self.fhandles[expt][stim][stimset]['Stim'].shape[-1]))
-                self.inds[expt][stim] = {stimset: {'start': runninglength, 'end': runninglength+len(valid), 'valid': valid}}
-                runninglength += len(valid)
+        self.spike_indices = {}
+        self.stim_indices = {}
         
-        self.num_samples = runninglength
+        
+        '''
+        Loop over all sessions, get valid indices, neurons, stimulus size, etc.
+        '''
+        for expt in self.sess_list:
+
+            fhandle = self.fhandles[expt]    
+            
+            '''
+            SPIKES
+            '''
+            unique_units = fhandle['Neurons'][self.spike_sorting]['cids'][0,:].astype(int)
+            
+            # map unit ids to index into the new ids
+            mc = np.max(unique_units)+1
+            unit_map = -1*np.ones(mc, dtype=int)
+            unit_map[unique_units] = np.arange(len(unique_units))+self.NC
+            
+            # number of units in this session
+            num_units = len(unique_units)
+
+            self.spike_indices[expt] = {'unit ids orig': unique_units,
+                'unit ids map': unit_map, 
+                'unit ids': np.arange(self.NC, num_units+self.NC)}
+
+            self.NC += num_units
+            self.stim_indices[expt] = {}
+
+            '''
+            STIM / BEHAVIOR Indices
+            '''
+            for stim in self.requested_stims:
+                if stim in self.fhandles[expt].keys():
+                    sz = fhandle[stim][stimset]['Stim'].shape
+                    
+                    self.stim_indices[expt][stim] = {'inds': np.arange(runninglength, runninglength + sz[-1])}
+                    self.valid_idx.append(runninglength + self.get_valid_indices(self.fhandles[expt], stim))
+
+                    runninglength += sz[-1]
+                    
+                    self.dims[1] = np.maximum(self.dims[1], sz[0])
+                    self.dims[2] = np.maximum(self.dims[1], sz[1])
+        
+        self.valid_idx = np.concatenate(self.valid_idx)
+        
+        ''' 
+        Pre-allocate memory for data
+        '''
+        self.stim = np.zeros(  self.dims + [runninglength], dtype=np.int8)
+        self.robs = np.zeros(  [runninglength, self.NC], dtype=np.int8)
+        self.dfs = np.zeros(   [runninglength, self.NC], dtype=np.int8)
+        self.eyepos = np.zeros([runninglength, 2], dtype=np.float32)
+        self.frame_times = np.zeros([runninglength,1], dtype=np.float32)
+
+        for expt in self.sess_list:
+            
+            fhandle = self.fhandles[expt]
+
+            for stim in self.requested_stims:
+                if stim in fhandle.keys():
+                    sz = fhandle[stim][stimset]['Stim'].shape
+                    inds = self.stim_indices[expt][stim]['inds']
+
+                    self.stim[0, :sz[0], :sz[1], inds] = np.transpose(fhandle[stim][stimset]['Stim'][...], [2,0,1])
+                    self.frame_times[inds] = fhandle[stim][stimset]['frameTimesOe'][...].T
+
+
+                    """ SPIKES """
+                    frame_times = self.frame_times[inds].flatten()
+
+                    spike_inds = np.where(np.logical_and(
+                        fhandle['Neurons'][self.spike_sorting]['times']>=frame_times[0],
+                        fhandle['Neurons'][self.spike_sorting]['times']<=frame_times[-1]+0.01)
+                        )[1]
+
+                    st = fhandle['Neurons'][self.spike_sorting]['times'][0,spike_inds]
+                    clu = fhandle['Neurons'][self.spike_sorting]['cluster'][0,spike_inds].astype(int)
+                    # only keep spikes that are in the requested cluster ids list
+
+                    ix = np.in1d(clu, self.spike_indices[expt]['unit ids orig'])
+                    st = st[ix]
+                    clu = clu[ix]
+                    # map cluster id to a unit number
+                    clu = self.spike_indices[expt]['unit ids map'][clu]
+
+                    robs_tmp = torch.sparse_coo_tensor( np.asarray([np.digitize(st, frame_times)-1, clu]),
+                        np.ones(len(clu)), (len(frame_times), self.NC) , dtype=torch.float32)
+                    robs_tmp = robs_tmp.to_dense().numpy().astype(np.int8)
+                    self.robs[inds,:] = robs_tmp
+
+                    """ DATAFILTERS """
+                    unit_ids = self.spike_indices['20200304']['unit ids']
+                    for unit in unit_ids:
+                        self.dfs[inds, unit] = 1
+
+                    """ EYE POSITION """
+                    ppd = fhandle[stim][self.stimset]['Stim'].attrs['ppd'][0]
+                    centerpix = fhandle[stim][self.stimset]['Stim'].attrs['center'][:]
+                    eye_tmp = fhandle[stim][self.stimset]['eyeAtFrame'][1:3,:].T
+                    eye_tmp[:,0] -= centerpix[0]
+                    eye_tmp[:,1] -= centerpix[1]
+                    eye_tmp/= ppd
+                    self.eyepos[inds,:] = eye_tmp
+
+
+        
+        
+
 
 
     def download_stim_files(self, download=True):
@@ -530,21 +640,44 @@ class Pixel(Dataset):
                     print("Download is False. Exiting...")
 
     def __len__(self):
-        return self.num_samples
+        return len(self.valid_idx)
     
     def __getitem__(self, idx):
+                    
+        r = self.robs[self.valid_idx[idx],:]
+        s = self.stim[..., self.valid_idx[idx,None]-range(self.num_lags)]
+        if len(s.shape)==5:
+            s = s.transpose(3,0,1,2,4)
         
+        return {'stim': torch.Tensor(s.astype('float32')), 'robs': torch.Tensor(r.astype('float32'))}
+    
+    def get_valid_indices(self, fhandle, stim):
+        # get blocks (start, stop) of valid samples
+        blocks = fhandle[stim][self.stimset]['blocks'][:,:]
+        valid = []
+        for bb in range(blocks.shape[1]):
+            valid.append(np.arange(blocks[0,bb]+self.num_lags*self.downsample_t,
+                blocks[1,bb])) # offset start by num_lags
+        
+        valid = np.concatenate(valid).astype(int)
 
-        for expt in self.sess_list:
-            for stim in self.requested_stims:
-                if idx >= self.inds[expt][stim][self.stimset]['start'] and idx <= self.inds[expt][stim][self.stimset]['end']:
-                    fidx = self.inds[expt][stim][self.stimset]['valid'][idx - self.inds[expt][stim][self.stimset]['start']]
-                    break
+        if self.fixations_only:
+            fixations = np.where(fhandle[stim][self.stimset]['labels'][:]==1)[1]
+            valid = np.intersect1d(valid, fixations)
+        
+        if self.valid_eye_rad:
+            xy = fhandle[stim][self.stimset]['eyeAtFrame'][1:3,:].T
+            xy[:,0] -= self.centerpix[0]
+            xy[:,1] = self.centerpix[1] - xy[:,1] # y pixels run down (flip when converting to degrees)
+            # convert to degrees
+            xy = xy/self.ppd
+            # subtract offset
+            xy[:,0] -= self.valid_eye_ctr[0]
+            xy[:,1] -= self.valid_eye_ctr[1]
+            eyeCentered = np.hypot(xy[:,0],xy[:,1]) < self.valid_eye_rad
+            valid = np.intersect1d(valid, np.where(eyeCentered)[0])
 
-        s = self.fhandles[expt][stim][self.stimset]['Stim'][..., fidx-self.num_lags : fidx]
-        r = self.fhandles[expt][stim][self.stimset]['Robs'][..., fidx]
-
-        return {'stim': torch.Tensor(s.astype('float32')).unsqueeze(0), 'robs': torch.Tensor(r.astype('float32'))}
+        return valid
 
 
 
