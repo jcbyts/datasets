@@ -6,7 +6,7 @@ import numpy as np
 import h5py
 from tqdm import tqdm
 import os
-from ..utils import ensure_dir, reporthook, bin_population, bin_population_sparse, downsample_time
+from ..utils import ensure_dir, reporthook, downsample_time
 
 """ Available Datasets:
 1. FixationMultiDataset - generates fixations from multiple stimulus classes 
@@ -49,6 +49,23 @@ def get_stim_url(id):
     
     return urlpath[id]
 
+def get_shifter_url(id):
+    urlpath = {
+            '20191119': 'https://www.dropbox.com/s/dd05gxt8l8hmw3o/shifter_20191119_kilowf.p?dl=1',
+            '20191120a': 'https://www.dropbox.com/s/h4elcp46le5tet0/shifter_20191120a_kilowf.p?dl=1',
+            '20191121': 'https://www.dropbox.com/s/rfzefex8diu5ts5/shifter_20191121_kilowf.p?dl=1',
+            '20191122': 'https://www.dropbox.com/s/2me7yauvpprnv0b/shifter_20191122_kilowf.p?dl=1',
+            '20191205': 'https://www.dropbox.com/s/r56wt4rfozmjiy8/shifter_20191205_kilowf.p?dl=1',
+            '20191206': 'https://www.dropbox.com/s/qec8cats077bx8c/shifter_20191206_kilowf.p?dl=1',
+            '20200304': 'https://www.dropbox.com/s/t0j8k55a8jexgt4/shifter_20210304_kilowf.p?dl=1',
+        }
+    
+    if id not in urlpath.keys():
+        raise ValueError('Stimulus URL not found')
+    
+    return urlpath[id]
+
+
 def download_set(sessname, fpath):
     
     ensure_dir(fpath)
@@ -56,6 +73,18 @@ def download_set(sessname, fpath):
     # Download the data set
     url = get_stim_url(sessname)
     fout = os.path.join(fpath, get_stim_list(sessname))
+    print("Downloading...") 
+    import urllib
+    urllib.request.urlretrieve(url, fout, reporthook)
+    print("Done")
+
+def download_shifter(sessname, fpath):
+    
+    ensure_dir(fpath)
+
+    # Download the data set
+    url = get_shifter_url(sessname)
+    fout = os.path.join(fpath, 'shifter_' + sessname + '_kilowf.p')
     print("Downloading...") 
     import urllib
     urllib.request.urlretrieve(url, fout, reporthook)
@@ -72,9 +101,6 @@ def shift_im(im, shift):
         import torch
         affine_trans = torch.tensor([[[1., 0., 0.], [0., 1., 0.]]])
         sz = im.shape
-        
-        # im = torch.tensor(im[:,None,:,:].astype('float32'))
-        # im = im.permute((3,1,0,2))
 
         aff = torch.tensor([[1,0,0],[0,1,0]])
 
@@ -106,6 +132,7 @@ class FixationMultiDataset(Dataset):
         max_fix_length: int=1000,
         download=True,
         flatten=True,
+        crop_inds=None,
         min_fix_length: int=50,
         valid_eye_rad=5.2,
         add_noise=0,
@@ -122,7 +149,7 @@ class FixationMultiDataset(Dataset):
         self.flatten = flatten
         self.num_lags = num_lags
         self.num_lags_pre_sac = num_lags_pre_sac
-        self.normalizing_constant = 15
+        self.normalizing_constant = 50
         self.max_fix_length = max_fix_length
         self.saccade_basis = saccade_basis
         self.shift = None # default shift to None. To provide shifts, set outside this class. Should be a list of shift values equal to size dataset.eyepos in every way
@@ -283,6 +310,13 @@ class FixationMultiDataset(Dataset):
                             self.fixation_inds.append(fix_inds[valid])
                             self.file_index.append(f) # which datafile does the fixation correspond to
                             self.stim_index.append(s) # which stimulus does the fixation correspond to
+            
+            if crop_inds is None:
+                self.crop_inds = [0, self.dims[1], 0, self.dims[2]]
+            else:
+                self.crop_inds = [crop_inds[0], crop_inds[1], crop_inds[2], crop_inds[3]]
+                self.dims[1] = crop_inds[1]-crop_inds[0]
+                self.dims[2] = crop_inds[3]-crop_inds[2]
 
     def __getitem__(self, index):
         """
@@ -322,13 +356,6 @@ class FixationMultiDataset(Dataset):
 
             if self.add_noise>0:
                 I += torch.randn(I.shape)*self.add_noise
-
-            # if we need to downsample
-            if self.downsample_t>1: # TODO: remove in future versions
-                sz = list(I.shape)
-                I = torch.flatten(I, start_dim=1)
-                I = downsample_time(I, self.downsample_t, flipped=False)
-                I = I.reshape([-1]+sz[1:])
             
             # append the stimulus to the list of tensors
             if self.shift is not None:
@@ -336,6 +363,8 @@ class FixationMultiDataset(Dataset):
             else:
                 I = I.unsqueeze(1)
             
+            I = I[...,self.crop_inds[0]:self.crop_inds[1],self.crop_inds[2]:self.crop_inds[3]]
+
             stim.append(I)
             fix_n.append(torch.ones(I.shape[0], dtype=torch.int64)*ifix)
 
@@ -458,6 +487,88 @@ class FixationMultiDataset(Dataset):
         
         new_shift = torch.cat(new_shift, dim=0)
         return new_shift
+
+    def plot_shifter(self, shifter, valid_eye_rad=5.2, ngrid = 100):
+        import matplotlib.pyplot as plt
+        xx,yy = np.meshgrid(np.linspace(-valid_eye_rad, valid_eye_rad,ngrid),np.linspace(-valid_eye_rad, valid_eye_rad,ngrid))
+        xgrid = torch.tensor( xx.astype('float32').reshape( (-1,1)))
+        ygrid = torch.tensor( yy.astype('float32').reshape( (-1,1)))
+
+        inputs = torch.cat( (xgrid,ygrid), dim=1)
+
+        xyshift = shifter(inputs).detach().numpy()
+
+        xyshift/=valid_eye_rad/60 # conver to arcmin
+        vmin = np.min(xyshift)
+        vmax = np.max(xyshift)
+
+        shift = [xyshift[:,0].reshape((ngrid,ngrid))]
+        shift.append(xyshift[:,1].reshape((ngrid,ngrid))) 
+        plt.figure(figsize=(6,3))
+        plt.subplot(1,2,1)
+        plt.imshow(shift[0], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None, vmin=vmin, vmax=vmax)
+        plt.colorbar()
+        plt.subplot(1,2,2)
+        plt.imshow(shift[1], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None, vmin=vmin, vmax=vmax)
+        plt.colorbar()
+        plt.show()
+
+        return shift
+
+    def get_shifters(self, plot=False):
+
+        shifters = {}
+        for sess in self.sess_list:
+            sfname = [f for f in os.listdir(self.dirname) if 'shifter_' + sess in f]
+                
+            if len(sfname) == 0:
+                from datasets.mitchell.pixel import download_shifter
+                download_shifter(self.sess_list[0], self.dirname)
+            else:
+                print("Shifter exists")
+                import pickle
+                fname = os.path.join(self.dirname, sfname[0])
+                shifter_res = pickle.load(open(fname, "rb"))
+                shifter = shifter_res['shifters'][np.argmin(shifter_res['vallos'])]
+
+            if plot:
+                _ = self.plot_shifter(shifter)
+            
+            shifters[sess] = shifter
+
+        return shifters
+    
+
+    def shift_stim(self, im, shift, unflatten=False):
+        """
+        apply shifter to translate stimulus as a function of the eye position
+        """
+        import torch.nn.functional as F
+        import torch
+        affine_trans = torch.tensor([[[1., 0., 0.], [0., 1., 0.]]])
+        sz = [im.shape[0]] + self.dims
+
+        if len(im.shape)==2:
+            unflatten = True
+            im = im.reshape(sz)
+
+        aff = torch.tensor([[1,0,0],[0,1,0]])
+
+        affine_trans = shift[:,:,None]+aff[None,:,:]
+        affine_trans[:,0,0] = 1
+        affine_trans[:,0,1] = 0
+        affine_trans[:,1,0] = 0
+        affine_trans[:,1,1] = 1
+
+        n = im.shape[0]
+        grid = F.affine_grid(affine_trans, torch.Size((n, 1, sz[-2], sz[-1])), align_corners=False)
+
+        im2 = F.grid_sample(im, grid, align_corners=False)
+
+        if unflatten:
+            torch.flatten(im2, start_dim=1)
+
+        return im2
 
 
 class Pixel(Dataset):
