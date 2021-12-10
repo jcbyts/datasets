@@ -116,7 +116,7 @@ def shift_im(im, shift):
 
         return im2.detach()
 
-def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100):
+def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100, title=None):
         import matplotlib.pyplot as plt
         xx,yy = np.meshgrid(np.linspace(-valid_eye_rad, valid_eye_rad,ngrid),np.linspace(-valid_eye_rad, valid_eye_rad,ngrid))
         xgrid = torch.tensor( xx.astype('float32').reshape( (-1,1)))
@@ -140,5 +140,7 @@ def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100):
         plt.imshow(shift[1], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None, vmin=vmin, vmax=vmax)
         plt.colorbar()
         plt.show()
+        if title is not None:
+            plt.suptitle(title)
 
         return shift

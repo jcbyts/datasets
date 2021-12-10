@@ -16,9 +16,6 @@ class Pixel(Dataset):
         requested_stims:list=["Gabor"],
         num_lags:int=12,
         load_shifters:bool=False,
-        cids:list=None,
-        flatten:bool=False,
-        dim_order:str='cwht',
         fixations_only:bool=False,
         valid_eye_rad:float=5.2,
         downsample_t:int=1,
@@ -35,8 +32,16 @@ class Pixel(Dataset):
         self.num_lags = num_lags
 
         self.fixations_only = fixations_only
-        self.valid_eye_rad = False
+        if self.fixations_only:
+            self.pad_fix_start = self.num_lags # pad by the number of stimulus lags
+
+        self.valid_eye_rad = valid_eye_rad
         self.downsample_t = downsample_t
+        if self.downsample_t > 1:
+            Warning("Downsampling time by %d not implemented yet. resetting to 1" % self.downsample_t)
+            self.downsample_t = 1
+
+        self.normalizing_constant = 50
 
         # find valid sessions
         stim_list = get_stim_list() # list of valid sessions
@@ -98,12 +103,6 @@ class Pixel(Dataset):
                     sz = fhandle[stim][stimset]['Stim'].shape
                     
                     self.stim_indices[expt][stim] = {'inds': np.arange(runninglength, runninglength + sz[-1]), 'corrected': False}
-                    self.valid_idx.append(runninglength + self.get_valid_indices(self.fhandles[expt], stim))
-
-                    # stats
-                    self.stim_indices[expt][stim]['frate'] = fhandle[stim][stimset]['Stim'].attrs['frate'][0]
-                    self.stim_indices[expt][stim]['ppd'] = fhandle[stim][stimset]['Stim'].attrs['ppd'][0]
-                    self.stim_indices[expt][stim]['rect'] = fhandle[stim][stimset]['Stim'].attrs['rect']
 
                     # fixation inds
                     fixations = fhandle[stim][self.stimset]['labels'][:].flatten()==1
@@ -117,12 +116,20 @@ class Pixel(Dataset):
                     self.stim_indices[expt][stim]['fix_start'] = fix_starts + runninglength
                     self.stim_indices[expt][stim]['fix_stop'] = fix_stops + runninglength
 
+                    self.valid_idx.append(runninglength + self.get_valid_indices(self.fhandles[expt], expt, stim))
+
+                    # basic info
+                    self.stim_indices[expt][stim]['frate'] = fhandle[stim][stimset]['Stim'].attrs['frate'][0]
+                    self.stim_indices[expt][stim]['ppd'] = fhandle[stim][stimset]['Stim'].attrs['ppd'][0]
+                    self.stim_indices[expt][stim]['rect'] = fhandle[stim][stimset]['Stim'].attrs['rect']
+                    self.stim_indices[expt][stim]['center'] = fhandle[stim][stimset]['Stim'].attrs['center']
+
                     runninglength += sz[-1]
                     
                     self.dims[1] = np.maximum(self.dims[1], sz[0])
                     self.dims[2] = np.maximum(self.dims[1], sz[1])
         
-        self.valid_idx = np.concatenate(self.valid_idx)
+        self.valid_idx = np.concatenate(self.valid_idx).astype(int)
         self.runninglength = runninglength
         self.dtype = torch.float32
         
@@ -135,14 +142,14 @@ class Pixel(Dataset):
             
         self.device = device
         if load_shifters:
-            shifters = self.get_shifters()
+            shifters = self.get_shifters(plot=True)
             self.correct_stim(shifters)
         
         self.shift = None
         self.raw_dims = self.dims
 
         self._crop_idx = [0, self.dims[1], 0, self.dims[2]]
-        
+
     @property
     def crop_idx(self):
         return self._crop_idx
@@ -166,9 +173,9 @@ class Pixel(Dataset):
         ''' 
         Pre-allocate memory for data
         '''
-        self.stim = np.zeros(  self.dims + [runninglength], dtype=np.int8)
-        self.robs = np.zeros(  [runninglength, self.NC], dtype=np.int8)
-        self.dfs = np.zeros(   [runninglength, self.NC], dtype=np.int8)
+        self.stim = np.zeros(  self.dims + [runninglength], dtype=np.float32)
+        self.robs = np.zeros(  [runninglength, self.NC], dtype=np.float32)
+        self.dfs = np.zeros(   [runninglength, self.NC], dtype=np.float32)
         self.eyepos = np.zeros([runninglength, 2], dtype=np.float32)
         self.frame_times = np.zeros([runninglength,1], dtype=np.float32)
 
@@ -268,7 +275,7 @@ class Pixel(Dataset):
 
             if plot:
                 from datasets.mitchell.pixel.utils import plot_shifter
-                _ = plot_shifter(shifter)
+                _ = plot_shifter(shifter, title=sess)
             
             shifters[sess] = shifter
 
@@ -279,8 +286,7 @@ class Pixel(Dataset):
             print("Correcting stim...")
 
         
-        from tqdm import tqdm
-        for sess in tqdm(shifters.keys()):
+        for sess in shifters.keys():
             if verbose:
                 print("Correcting session [%s]" % sess)
             for stim in self.stim_indices[sess].keys():    
@@ -297,46 +303,7 @@ class Pixel(Dataset):
         if verbose:
             print("Done correcting stim.")
 
-    def __len__(self):
-        return len(self.valid_idx)
-    
-    def __getitem__(self, idx):
-                    
-        s = self.stim[..., self.valid_idx[idx,None]-range(self.num_lags)]
-        
-        if not self.device:
-            s = torch.tensor(s.astype('float32'))
-        
-        if len(s.shape)==5: # handle array vs singleton indices
-                s = s.permute(3,0,1,2,4) # N, C, H, W, T
-        
-        if self.shift is not None:
-            if len(s.shape)==5:
-                s = shift_im(s.permute(3,4,0,1,2).reshape([-1] + self.rawdims),
-                        self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([-1] + [self.num_lags] + self.dims).permute(0,2,3,4,1)
-            else:
-                s = shift_im(s.permute(3,0,1,2).reshape([-1] + self.rawdims),
-                        self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([self.num_lags] + self.dims).permute(1,2,3,0)
-
-        s = s[...,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3], :]
-
-        if self.device:
-            out = {'stim': s,
-                'robs': self.robs[self.valid_idx[idx],:],
-                'dfs': self.dfs[self.valid_idx[idx],:],
-                'eyepos': self.eyepos[self.valid_idx[idx],:],
-                'frame_times': self.frame_times[self.valid_idx[idx],:]}
-        else:
-
-            out = {'stim': s,
-                'robs': torch.tensor(self.robs[self.valid_idx[idx],:].astype('float32')),
-                'dfs': torch.tensor(self.dfs[self.valid_idx[idx],:].astype('float32')),
-                'eyepos': torch.tensor(self.eyepos[self.valid_idx[idx],:].astype('float32')),
-                'frame_times': torch.tensor(self.frame_times[self.valid_idx[idx],:].astype('float32'))}
-
-        return out
-    
-    def get_valid_indices(self, fhandle, stim):
+    def get_valid_indices(self, fhandle, sess, stim):
         # get blocks (start, stop) of valid samples
         blocks = fhandle[stim][self.stimset]['blocks'][:,:]
         valid = []
@@ -347,19 +314,123 @@ class Pixel(Dataset):
         valid = np.concatenate(valid).astype(int)
 
         if self.fixations_only:
-            fixations = np.where(fhandle[stim][self.stimset]['labels'][:]==1)[1]
+            # fixation inds
+            fixations = fhandle[stim][self.stimset]['labels'][:].flatten()==1
+            fix_starts = np.where(np.diff(fixations.astype('int8'))==1)[0]
+            fix_stops = np.where(np.diff(fixations.astype('int8'))==-1)[0]
+            if fixations[0]:
+                fix_starts = np.insert(fix_starts, 0, 0)
+            if fixations[-1]:
+                fix_stops = np.append(fix_stops, fixations.size)
+            nfix = fix_stops.size
+            fixations = []
+            for ifix in range(nfix):
+                fix_inds = np.arange(fix_starts[ifix]+self.pad_fix_start, fix_stops[ifix])
+                if len(fix_inds)>0:
+                    fixations.append(fix_inds)
+            fixations = np.concatenate(fixations)
+            print("Found %d fixation indices" % fixations.size)
+            print("%d valid indices" % valid.size)
             valid = np.intersect1d(valid, fixations)
+            print("New valid size: %d" % valid.size)
+
+            # fixations = np.where(fhandle[stim][self.stimset]['labels'][:]==1)[1]
+            # valid = np.intersect1d(valid, fixations)
         
         if self.valid_eye_rad:
+            ppd = self.stim_indices[sess][stim]['ppd']
+            centerpix = self.stim_indices[sess][stim]['center']
             xy = fhandle[stim][self.stimset]['eyeAtFrame'][1:3,:].T
-            xy[:,0] -= self.centerpix[0]
-            xy[:,1] = self.centerpix[1] - xy[:,1] # y pixels run down (flip when converting to degrees)
+            xy[:,0] -= centerpix[0]
+            xy[:,1] = centerpix[1] - xy[:,1] # y pixels run down (flip when converting to degrees)
             # convert to degrees
-            xy = xy/self.ppd
-            # subtract offset
-            xy[:,0] -= self.valid_eye_ctr[0]
-            xy[:,1] -= self.valid_eye_ctr[1]
+            xy = xy/ppd
+
             eyeCentered = np.hypot(xy[:,0],xy[:,1]) < self.valid_eye_rad
             valid = np.intersect1d(valid, np.where(eyeCentered)[0])
 
         return valid
+    
+    def get_fixation_indices(self):
+        fixations = []
+        for sess in self.sess_list:
+            for stim in self.stim_indices[sess].keys():
+                for ii in range(len(self.stim_indices[sess][stim]['fix_start'])):
+                    fix_inds = np.arange(self.stim_indices[sess][stim]['fix_start'][ii], 
+                    self.stim_indices[sess][stim]['fix_stop'][ii])
+                    fixations.append(fix_inds)
+        
+        return fixations
+    
+    def get_train_indices(self, seed=1234, frac_train=0.8):
+
+        fixations = self.get_fixation_indices()
+        nfix = len(fixations)
+        np.random.seed(seed)
+        train_fix = np.random.choice(nfix, size=int(frac_train*nfix), replace=False)
+
+        fixes = np.asarray(fixations, dtype=object)
+
+        train_inds = np.concatenate(fixes[train_fix])
+
+        train_inds = np.where(np.in1d(self.valid_idx, train_inds))[0]
+        val_inds = np.setdiff1d(np.arange(len(self.valid_idx)), train_inds).tolist()
+        train_inds = train_inds.tolist()
+
+        return train_inds, val_inds
+    
+    def get_stas(self, device=None, batch_size=1000):
+        from torch.utils.data import DataLoader
+        from tqdm import tqdm
+        
+        train_loader = DataLoader(self, batch_size=batch_size, shuffle=False, num_workers=int(os.cpu_count()//2))
+
+        if device is None:
+            device = torch.device('cpu')
+
+        xy = 0
+        ny = 0
+        for data in tqdm(train_loader):
+            x = torch.flatten(data['stim'], start_dim=1)    
+            y = data['robs']*data['dfs']
+            x = x.to(device)
+            y = y.to(device)
+        
+            xy += (x.T@y).detach().cpu()
+            ny += (y.sum(dim=0)).detach().cpu()
+
+        stas = (xy/ny).reshape(self.dims[1:] + [self.num_lags] + [self.NC]).permute(2,0,1,3)
+
+        return stas
+
+    def __len__(self):
+        return len(self.valid_idx)
+    
+    def __getitem__(self, idx):
+
+        s = self.stim[:,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3],self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
+        # s = self.stim[..., self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
+        
+        if not isinstance(s, torch.Tensor):
+            s = torch.tensor(s.astype('float32'))
+        
+        if len(s.shape)==5: # handle array vs singleton indices
+                s = s.permute(3,0,1,2,4) # N, C, H, W, T
+        
+        if self.shift is not None:
+            if len(s.shape)==5:
+                s = shift_im(s.permute(3,4,0,1,2).reshape([-1] + self.dims),
+                        self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([-1] + [self.num_lags] + self.dims).permute(0,2,3,4,1)
+            else:
+                s = shift_im(s.permute(3,0,1,2).reshape([-1] + self.dims),
+                        self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([self.num_lags] + self.dims).permute(1,2,3,0)
+
+        # s = s[...,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3], :]
+
+        out = {'stim': s,
+            'robs': self.robs[self.valid_idx[idx],:],
+            'dfs': self.dfs[self.valid_idx[idx],:],
+            'eyepos': self.eyepos[self.valid_idx[idx],:],
+            'frame_times': self.frame_times[self.valid_idx[idx],:]}
+
+        return out
