@@ -5,7 +5,7 @@ import scipy.io as sio
 
 import torch
 from torch.utils.data import Dataset
-import NDNT.NDNutils as NDNutils
+import Utils as Utils
 from ..utils import download_file, ensure_dir
 from copy import deepcopy
 import h5py
@@ -39,6 +39,9 @@ class WhiskerData(Dataset):
 
         assert preload, 'havent implemented non-preloaded. may never have to?'
         assert len(sess_list) == 1, 'Cant yet do multiple datasets.'
+        if device is None:
+            device = torch.device('cpu') # default is to store on CPU
+
         self.preload = preload
         self.device = device
         self.datadir = datadir
@@ -83,14 +86,14 @@ class WhiskerData(Dataset):
             self.use_units = []
 
             if self.preload:
-                self.touches_full = torch.zeros([NT, 4], dtype=torch.float32)
-                self.RobsL = torch.zeros([NT, NCLfile], dtype=torch.float32)
-                self.RobsR = torch.zeros([NT, NCRfile], dtype=torch.float32)
+                self.touches_full = torch.zeros([NT, 4], dtype=torch.float32, device=self.device)
+                self.RobsL = torch.zeros([NT, NCLfile], dtype=torch.float32, device=self.device)
+                self.RobsR = torch.zeros([NT, NCRfile], dtype=torch.float32, device=self.device)
 
             # these dont depend on preloading because they are just used in constructor (for now)
             # and they are by trial so easy to just read into memory
-            self.TRpistons = self.fhandles[f]['TRpistons']
-            phases = torch.zeros([NT, 4], dtype=torch.float32)
+            self.TRpistons = torch.tensor(self.fhandles[f]['TRpistons'], dtype=torch.int64)
+            phases = torch.zeros([NT, 4], dtype=torch.float32, device=self.device)
 
             tr_count = 0
             # Organize trials
@@ -107,30 +110,31 @@ class WhiskerData(Dataset):
                 # Loading data bit-by-bit is better than all at once
                 phases[trange, :] = torch.tensor(
                     self.fhandles[f]['phases'][trange,:], 
-                    dtype=torch.float32)
+                    dtype=torch.float32, device=self.device)
                     
                 if self.preload:
                     self.touches_full[trange, :] = torch.tensor(
                         self.fhandles[f]['touches'][trange, :], 
-                        dtype=torch.float32)
+                        dtype=torch.float32, device=self.device)
 
                     self.RobsL[trange, :] = torch.tensor(
                         self.fhandles[f]['RobsL'][trange, :].astype(float), 
-                        dtype=torch.float32)
+                        dtype=torch.float32, device=self.device)
 
                     self.RobsR[trange, :] = torch.tensor(
                         self.fhandles[f]['RobsR'][trange, :].astype(float), 
-                        dtype=torch.float32)
+                        dtype=torch.float32, device=self.device)
 
                 tr_count += 1
 
-            if self.preload and device is not None:
-                self.RobsL.to(device)
-                self.RobsR.to(device)
-                self.touches_full.to(device)
-                
             self.trial_grouping.append(np.arange(tr_count, dtype='int64')+self.num_trials)
             self.num_trials += tr_count
+            
+        #if self.preload and device is not None:
+        #    self.RobsL.to(device)
+        #    self.RobsR.to(device)
+        #    self.touches_full.to(device)
+        
 
         # Develop default train, validation, and test datasets 
         #self.crossval_setup() 
@@ -140,22 +144,26 @@ class WhiskerData(Dataset):
         if self.preload:
             #self.touches_full = torch.tensor(self.fhandles[f]['touches'], dtype=torch.float32)
             # Derive onset responses
-            self.touches = torch.zeros([self.touches_full.shape[0], 4])
+            #if device is not None:
+            #    self.touches = torch.zeros([self.touches_full.shape[0], 4], device=device)
+            #else:
+            self.touches = torch.zeros([self.touches_full.shape[0], 4], device=self.device)
 
+            self.phase_ref = torch.zeros([phases.shape[0],1], device=self.device)
+            
             for ww in range(4):
                 Tonset = self.touches_full[1:,ww] - self.touches_full[:-1,ww]
-                Tonset = torch.cat( (Tonset, torch.zeros(1)), axis=0 )
+                Tonset = torch.cat( (Tonset, torch.zeros(1, device=self.device)), axis=0 )
                 self.touches[Tonset > 0, ww] = 1.0
 
-            if device is not None:
-                self.touches.to(device)
-
+            #if device is not None:
+                # Touches was created on CPU
+                #self.touches.to(self.device) # this will not move it to GPU by itself
             # Import RobsR and RobsL
             #self.RobsL = torch.tensor(self.fhandles[f]['RobsL'], dtype=torch.float32)
             #self.RobsR = torch.tensor(self.fhandles[f]['RobsR'], dtype=torch.float32)
 
             # Compute useable phase from 4 phase variables
-            self.phase_ref = torch.zeros([phases.shape[0],1])
             if hemis == 1:
                 wtars = [2,3]
             else:
@@ -173,31 +181,32 @@ class WhiskerData(Dataset):
             self.Xphase = self.create_phase_design_matrix( num_bins=num_phase_bins )
             if device is not None:
                 self.Xphase.to(device)
+            print('Xphase device after:', self.Xphase.device)
 
             # Process LV information initally (store in variable in memory)
             if self.LVhemis is None:
                 self.LVin = None
             else:
                 if (self.LVhemis == 0) or (self.LVhemis == 2):
-                    LVin_tmp = torch.tensor(self.fhandles[f]['RobsL'], dtype=torch.float32)
+                    LVin_tmp = torch.tensor(self.fhandles[f]['RobsL'], dtype=torch.float32, device=self.device)
                 else:
-                    LVin_tmp  = torch.tensor(self.fhandles[f]['RobsR'], dtype=torch.float32) 
+                    LVin_tmp  = torch.tensor(self.fhandles[f]['RobsR'], dtype=torch.float32, device=self.device) 
                 if self.hemis == 2:
                     LVin_tmp  = torch.cat(
                         (LVin_tmp,
-                        torch.tensor(self.fhandles[f]['RobsR'], dtype=torch.float32)), 
+                        torch.tensor(self.fhandles[f]['RobsR'], dtype=torch.float32, device=self.device)), 
                         dim=1)
                 # Apply tent basis
                 if LVsmooth < 2:
                     self.LVin = LVin_tmp
                 else:
                     self.LVin = torch.tensor(
-                        NDNutils.create_time_embedding(
+                        Utils.create_time_embedding(
                             LVin_tmp, 
                             [numLVlags, LVin_tmp.shape[1], 1], tent_spacing=self.LVsmooth),
-                        dtype = torch.float32)
-                if device is not None:
-                    self.LVin.to(device)
+                        dtype = torch.float32, device=self.device)
+                #if device is not None:
+                #    self.LVin.to(device)
     
         if hemis == 0:
             self.NC = self.num_cells[0]
@@ -259,13 +268,13 @@ class WhiskerData(Dataset):
         
         NT = self.phase_ref.shape[0]
         bins = np.arange(num_bins)*2*np.pi/num_bins - np.pi
-        XNL = NDNutils.design_matrix_tent_basis( self.phase_ref.numpy(), bins, zero_left=True )
-        return torch.tensor(XNL, dtype=torch.float32)
+        XNL = Utils.design_matrix_tent_basis( self.phase_ref.cpu().numpy(), bins, zero_left=True )
+        return torch.tensor(XNL, dtype=torch.float32, device=self.device)
 
     ########## GET ITEM ##########
     def __getitem__(self, index):
         
-        if NDNutils.is_int(index):
+        if Utils.is_int(index):
             index = [index]
         elif type(index) is slice:
             index = list(range(index.start or 0, index.stop or len(self.block_inds), index.step or 1))
@@ -309,19 +318,25 @@ class WhiskerData(Dataset):
                 if self.preload:
                     robs_tmp = self.RobsL[inds,:]
                 else:
-                    robs_tmp = torch.tensor(self.fhandles[f]['RobsL'][inds,:], dtype=torch.float32)
+                    robs_tmp = torch.tensor(
+                        self.fhandles[f]['RobsL'][inds,:],
+                        dtype=torch.float32, device=self.device)
             else:
                 if self.preload:
                     robs_tmp = self.RobsR[inds,:]
                 else:
-                    robs_tmp = torch.tensor(self.fhandles[f]['RobsR'][inds,:], dtype=torch.float32) 
+                    robs_tmp = torch.tensor(
+                        self.fhandles[f]['RobsR'][inds,:],
+                        dtype=torch.float32, device=self.device) 
             if self.hemis == 2:
                 if self.preload:
                     robs_tmp = torch.cat( (robs_tmp, self.RobsR[inds, :]), dim=1 ) 
                 else:
                     robs_tmp = torch.cat(
                         (robs_tmp,
-                        torch.tensor(self.fhandles[f]['RobsR'][inds,:], dtype=torch.float32)), 
+                        torch.tensor(
+                            self.fhandles[f]['RobsR'][inds,:], 
+                            dtype=torch.float32, device=self.device)), 
                         dim=1)
             
             if len(self.use_units) > 0:
@@ -335,7 +350,7 @@ class WhiskerData(Dataset):
             #    dim=1)
 
             """ Datafilters: needs padding like robs """
-            dfs_tmp = torch.ones(robs_tmp.shape, dtype=torch.float32)
+            dfs_tmp = torch.ones(robs_tmp.shape, dtype=torch.float32, device=self.device)
             dfs_tmp[:self.num_lags, :] = 0.0
 
             #dfs_tmp[:self.num_lags,:] = 0 # invalidate the filter length
@@ -386,8 +401,8 @@ class WhiskerData(Dataset):
             NC = len(self.use_units)
         else:
             NC = self.NC
-        Rav = torch.zeros(NC)
-        Tcount = torch.zeros(NC)
+        Rav = torch.zeros(NC, device=self.device)
+        Tcount = torch.zeros(NC, device=self.device)
 
         for tt in data_inds:
             sample = self[tt]
@@ -396,9 +411,9 @@ class WhiskerData(Dataset):
                 Tcount += torch.sum(sample['dfs'], dim=0)
             else:
                 Rav += torch.sum( sample['robs'], dim=0)
-                Tcount += sample['robs'].shape[0] * torch.ones(NC)
+                Tcount += sample['robs'].shape[0] * torch.ones(NC, device=self.device)
         Rav = torch.div( Rav, Tcount.clamp(min=1) )
-        return Rav.detach().numpy()
+        return Rav.cpu().detach().numpy()
 
     def select_neurons( self, threshold=None, reset=False, valdata=True, data_inds=None ):
         if reset:

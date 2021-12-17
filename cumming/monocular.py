@@ -5,7 +5,7 @@ import scipy.io as sio
 
 import torch
 from torch.utils.data import Dataset
-import NDNT.NDNutils as NDNutils
+import Utils as Utils
 from ..utils import download_file, ensure_dir
 from copy import deepcopy
 import h5py
@@ -255,7 +255,7 @@ class MultiDatasetFix(Dataset):
 
     def __getitem__(self, index):
         
-        if NDNutils.is_int(index):
+        if Utils.is_int(index):
             index = [index]
         elif type(index) is slice:
             index = list(range(index.start or 0, index.stop or len(self.block_inds), index.step or 1))
@@ -357,7 +357,7 @@ class MonocularDataset(Dataset):
         if dirname is None:
             raise ValueError('dirname must be specified')
         
-        NDNutils.ensure_dir(dirname)
+        Utils.ensure_dir(dirname)
 
         # check if we need to download the data
         fpath = os.path.join(dirname, sessname + '.mat')
@@ -373,7 +373,7 @@ class MonocularDataset(Dataset):
         stim, Robs, datafilters, Eadd_info = monocular_data_import( dirname, sessname, num_lags=num_lags )
 
         NX = stim.shape[1]
-        Xstim = NDNutils.create_time_embedding( stim, [num_lags, NX, 1])
+        Xstim = Utils.create_time_embedding( stim, [num_lags, NX, 1])
         NT, NC = Robs.shape
         # For index parsing
         used_inds = Eadd_info['used_inds']
@@ -481,7 +481,7 @@ def monocular_data_import( datadir, exptn, num_lags=20 ):
     NC = len(sus)
     layers = matdata['layers'][0,:]
     block_list = matdata['block_inds'] # note matlab indexing
-    stim_all = NDNutils.shift_mat_zpad(matdata['stimulus'], time_shift, 0)
+    stim_all = Utils.shift_mat_zpad(matdata['stimulus'], time_shift, 0)
     NTtot, NX = stim_all.shape
     DFs_all = deepcopy(matdata['data_filters'][:,sus])
     Robs_all = deepcopy(matdata['binned_SU'][:,sus])
@@ -493,7 +493,7 @@ def monocular_data_import( datadir, exptn, num_lags=20 ):
     Ub = np.array(list(set(list(range(NBL)))-set(Xb)), dtype='int')
     
     used_inds = make_block_inds( block_list, gap=num_lags )
-    Ui, Xi = NDNutils.generate_xv_folds( len(used_inds) )
+    Ui, Xi = Utils.generate_xv_folds( len(used_inds) )
     TRinds, TEinds = used_inds[Ui].astype(int), used_inds[Xi].astype(int)
 
     Eadd_info = {
