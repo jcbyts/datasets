@@ -5,7 +5,9 @@ import scipy.io as sio
 
 import torch
 from torch.utils.data import Dataset
-import Utils as Utils
+
+import NDNT.utils as NDNutils
+
 from ..utils import download_file, ensure_dir
 from copy import deepcopy
 import h5py
