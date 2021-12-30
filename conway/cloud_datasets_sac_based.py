@@ -29,8 +29,7 @@ class ColorClouds(Dataset):
     def __init__(self,
         sess_list,
         datadir, 
-        num_lags=10,
-        stim_crop = None,
+        num_lags=12,
         include_MUs = False,
         preload = True,
         time_embed = 2,  # 0 is no time embedding, 1 is time_embedding with get_item, 2 is pre-time_embedded
@@ -47,7 +46,6 @@ class ColorClouds(Dataset):
             assert preload, "Cannot pre-time-embed without preloading."
         self.preload = preload
         self.time_embed = time_embed
-        self.stim_crop = stim_crop
 
         # get hdf5 file handles
         self.fhandles = [h5py.File(os.path.join(datadir, sess + '.hd5'), 'r') for sess in self.sess_list]
@@ -55,7 +53,8 @@ class ColorClouds(Dataset):
         # build index map
         self.data_threshold = 6  # how many valid time points required to include saccade?
         self.file_index = [] # which file the block corresponds to
-        self.sacc_inds = []
+        self.block_inds = []
+        self.fix_n = []
         #self.unit_ids = []
         self.num_units = []
         self.num_sus = []
@@ -67,7 +66,7 @@ class ColorClouds(Dataset):
         self.include_MUs = include_MUs
         self.SUinds = []
         self.MUinds = []
-    
+
         # Set up to store default train_, val_, test_inds
         self.test_inds = None
         self.val_inds = None
@@ -102,32 +101,29 @@ class ColorClouds(Dataset):
             sac_inds = fhandle['sac_inds']
             NStmp = sac_inds.shape[0]
             NT = fhandle['Robs'].shape[0]
-
-            # Make saccade ranges for each saccade
-            self.sacc_inds = []
-            for b in range(NStmp):
-                self.file_index.append(f)
-                if b < NStmp-1:
-                    self.sacc_inds.append( [sac_inds[b]-1+runninglength, sac_inds[b+1]+runninglength] )
-                else:
-                    self.sacc_inds.append( [sac_inds[b]-1+runninglength, runninglength+NT] )
-            
-
-            self.fixation_grouping.append(list(np.arange(NStmp, dtype='int64')+self.num_fixations))
-            self.num_fixations += NStmp
             runninglength += NT
 
-        self.NT  = runninglength
-        #self.valid_inds = range(self.NT)  # default -- to be changed at end of init
+            fix_count = 0
 
-        # Go through saccades to establish val_indices and produce saccade timing vector 
-        # Note that sacc_ts will be generated even without preload -- small enough that doesnt matter
-        self.sacc_ts = np.zeros([self.NT, 1], dtype=np.float32)
-        self.fix_n = np.zeros(self.NT, dtype=np.int64)  # label of which fixation is in each range
-        for nn in range(self.num_fixations):
-            self.sacc_ts[self.sacc_inds[nn][0]] = 1 
-            self.fix_n[range(self.sacc_inds[nn][0], self.sacc_inds[nn][1])] = nn
-        #self.fix_n = list(self.fix_n)  # better list than numpy
+            # Break up by fixations based on sacc indices          
+            for b in range(NStmp):
+                self.file_index.append(f)
+                
+                if b < NStmp-1:
+                    trange = list(np.arange(sac_inds[b]-1, sac_inds[b+1]))
+                else:
+                    trange = list(np.arange(sac_inds[b]-1, NT))
+
+                # Verify that there is some data there (rather than being a blank)
+                if np.mean(np.sum(fhandle['DFs'][trange[num_lags:], :],axis=0)) > self.data_threshold:
+                    self.block_inds.append(deepcopy(trange))
+                    self.fix_n.append(b+self.num_fixations)
+                    fix_count += 1
+
+            self.fixation_grouping.append(np.arange(fix_count, dtype='int64')+self.num_fixations)
+            self.num_fixations += fix_count
+
+        self.runninglength  = runninglength
 
         #self.dims = np.unique(np.asarray(self.dims)) # assumes they're all the same    
         if self.eyepos is not None:
@@ -138,13 +134,6 @@ class ColorClouds(Dataset):
             print("Loading data into memory...")
             self.preload_numpy()
 
-            # Note stim is being represented as full 3-d + 1 tensor (time, channels, NX, NY)
-            if self.eyepos is not None:
-                # Would want to shift by input eye positions if input here
-                print('eye-position shifting not implemented yet')
-            if self.stim_crop is not None:
-                print('stimulus cropping not implemented yet')
-
             if time_embed == 2:
                 print("Time embedding...")
                 idx = np.arange(runninglength)
@@ -152,27 +141,22 @@ class ColorClouds(Dataset):
                     self.stim[np.arange(runninglength)[:,None]-np.arange(num_lags), :, :, :],
                     axes=[0,2,3,4,1])
 
-            # now stimulus is represented as full 4-d + 1 tensor (time, channels, NX, NY, num_lags)
-
             # Flatten stim 
-            self.stim = np.reshape(self.stim, [self.NT, -1])
+            self.stim = np.reshape(self.stim, [runninglength, -1])
 
             # Convert data to tensors
             #if self.device is not None:
             self.to_tensor(self.device)
             print("Done.")
 
-        # Create valid indices and first pass of cross-validation indices
-        self.create_valid_indices()
         # Develop default train, validation, and test datasets 
-        self.crossval_setup() 
-
+            #self.crossval_setup() 
     # END ColorClouds.__init__
 
     def preload_numpy(self):
         """Note this loads stimulus but does not time-embed"""
 
-        NT = self.NT
+        NT = self.runninglength
         ''' 
         Pre-allocate memory for data
         '''
@@ -202,6 +186,35 @@ class ColorClouds(Dataset):
             #eye_tmp/= ppd
             #self.eyepos[inds,:] = eye_tmp
 
+            """ SPIKES """            
+            #frame_times = self.frame_times[inds].flatten()
+
+            #spike_inds = np.where(np.logical_and(
+            #    fhandle['Neurons'][self.spike_sorting]['times']>=frame_times[0],
+            #    fhandle['Neurons'][self.spike_sorting]['times']<=frame_times[-1]+0.01)
+            #    )[1]
+
+            #st = fhandle['Neurons'][self.spike_sorting]['times'][0,spike_inds]
+            #clu = fhandle['Neurons'][self.spike_sorting]['cluster'][0,spike_inds].astype(int)
+            # only keep spikes that are in the requested cluster ids list
+
+            #ix = np.in1d(clu, self.spike_indices[expt]['unit ids orig'])
+            #st = st[ix]
+            #clu = clu[ix]
+            # map cluster id to a unit number
+            #clu = self.spike_indices[expt]['unit ids map'][clu]
+
+            #robs_tmp = torch.sparse_coo_tensor( np.asarray([np.digitize(st, frame_times)-1, clu]),
+            #    np.ones(len(clu)), (len(frame_times), self.NC) , dtype=torch.float32)
+            #robs_tmp = robs_tmp.to_dense().numpy().astype(np.int8)
+            
+            #discontinuities = np.diff(frame_times) > 1.25*dt
+            #if np.any(discontinuities):
+            #    print("Removing discontinuitites")
+            #    good = np.where(~discontinuities)[0]
+            #    robs_tmp = robs_tmp[good,:]
+            #    inds = inds[good]
+
             """ Robs and DATAFILTERS"""
             robs_tmp = np.zeros( [len(inds), self.NC], dtype=np.float32 )
             dfs_tmp = np.zeros( [len(inds), self.NC], dtype=np.float32 )
@@ -218,6 +231,11 @@ class ColorClouds(Dataset):
             self.robs[inds,:] = deepcopy(robs_tmp)
             self.dfs[inds,:] = deepcopy(dfs_tmp)
 
+            """ DATAFILTERS """
+
+            #unit_ids = self.spike_indices[expt]['unit ids']
+            #for unit in unit_ids:
+            #    self.dfs[inds, unit] = 1
             t_counter += sz[0]
             unit_counter += self.num_units[ee]
 
@@ -227,7 +245,6 @@ class ColorClouds(Dataset):
         self.stim = torch.tensor(self.stim, dtype=torch.float32, device=device)
         self.robs = torch.tensor(self.robs, dtype=torch.float32, device=device)
         self.dfs = torch.tensor(self.dfs, dtype=torch.float32, device=device)
-        self.sacc_ts = torch.tensor(self.sacc_ts, dtype=torch.float32, device=device)
         #self.eyepos = torch.tensor(self.eyepos.astype('float32'), dtype=self.dtype, device=device)
         #self.frame_times = torch.tensor(self.frame_times.astype('float32'), dtype=self.dtype, device=device)
 
@@ -248,28 +265,7 @@ class ColorClouds(Dataset):
         return shstim
     # END MultiDatasetFix.shift_stim_fixation
 
-    def create_valid_indices(self, post_sacc_gap=None):
-        """
-        This creates self.valid_inds vector that is used for __get_item__ 
-        -- Will default to num_lags following each saccade beginning"""
-
-        if post_sacc_gap is None:
-            post_sacc_gap = self.num_lags
-
-        # first, throw out all data where all data_filters are zero
-        is_valid = np.zeros(self.NT, dtype=np.int64)
-        is_valid[torch.sum(self.dfs, axis=1) > 0] = 1
-        
-        # Now invalid post_sacc_gap following saccades
-        for nn in range(self.num_fixations):
-            sts = self.sacc_inds[nn]
-            is_valid[range(sts[0], np.minimum(sts[0]+post_sacc_gap, self.NT))] = 0
-        
-        #self.valid_inds = list(np.where(is_valid > 0)[0])
-        self.valid_inds = np.where(is_valid > 0)[0]
-    # END .create_valid_indices
-
-    def crossval_setup(self, folds=5, random_gen=False, test_set=True, verbose=False):
+    def crossval_setup(self, folds=5, random_gen=False, test_set=True):
         """This sets the cross-validation indices up We can add featuers here. Many ways to do this
         but will stick to some standard for now. It sets the internal indices, which can be read out
         directly or with helper functions. Perhaps helper_functions is the best way....
@@ -280,46 +276,26 @@ class ColorClouds(Dataset):
         Outputs:
             None: sets internal variables test_inds, train_inds, val_inds
         """
-        assert self.valid_inds is not None, "Must first specify valid_indices before setting up cross-validation."
 
-        # Partition data by saccades, and then associate indices with each
-        te_fixes, tr_fixes, val_fixes = [], [], []
-        for ee in range(len(self.fixation_grouping)):  # Loops across experiments
-            fixations = np.array(self.fixation_grouping[ee])  # fixations associated with each experiment
-            val_fix1, tr_fix1 = self.fold_sample(len(fixations), folds, random_gen=random_gen)
+        test_fixes = []
+        tfixes = []
+        vfixes = []
+        for ee in range(len(self.fixation_grouping)):
+            fix_inds = self.fixation_grouping[ee]
+            vfix1, tfix1 = self.fold_sample(len(fix_inds), folds, random_gen=random_gen)
             if test_set:
-                te_fixes += list(fixations[val_fix1])
-                val_fix2, tr_fix2 = self.fold_sample(len(tr_fix1), folds, random_gen=random_gen)
-                val_fixes += list(fixations[tr_fix1[val_fix2]])
-                tr_fixes += list(fixations[tr_fix1[tr_fix2]])
+                test_fixes += list(fix_inds[vfix1])
+                vfix2, tfix2 = self.fold_sample(len(tfix1), folds, random_gen=random_gen)
+                vfixes += list(fix_inds[tfix1[vfix2]])
+                tfixes += list(fix_inds[tfix1[tfix2]])
             else:
-                val_fixes += list(fixations[val_fix1])
-                tr_fixes += list(fixations[tr_fix1])
+                vfixes += list(fix_inds[vfix1])
+                tfixes += list(fix_inds[tfix1])
 
-        if verbose:
-            print("Partitioned %d fixations total: tr %d, val %d, te %d"
-                %(len(te_fixes)+len(tr_fixes)+len(val_fixes),len(tr_fixes), len(val_fixes), len(te_fixes)))  
-
-        # Now pull  indices from each saccade 
-        tr_inds, te_inds, val_inds = [], [], []
-        for nn in tr_fixes:
-            tr_inds += range(self.sacc_inds[nn][0], self.sacc_inds[nn][1])
-        for nn in val_fixes:
-            val_inds += range(self.sacc_inds[nn][0], self.sacc_inds[nn][1])
-        for nn in te_fixes:
-            te_inds += range(self.sacc_inds[nn][0], self.sacc_inds[nn][1])
-
-        if verbose:
-            print( "Pre-valid data indices: tr %d, val %d, te %d" %(len(tr_inds), len(val_inds), len(te_inds)) )
-
-        # Finally intersect with valid indices
-        self.train_inds = np.array(list(set(tr_inds) & set(self.valid_inds)))
-        self.val_inds = np.array(list(set(val_inds) & set(self.valid_inds)))
-        self.test_inds = np.array(list(set(te_inds) & set(self.valid_inds)))
-
-        if verbose:
-            print( "Valid data indices: tr %d, val %d, te %d" %(len(self.train_inds), len(self.val_inds), len(self.test_inds)) )
-
+        self.val_inds = np.array(vfixes, dtype='int64')
+        self.train_inds = np.array(tfixes, dtype='int64')
+        if test_set:
+           self.test_inds = np.array(test_fixes, dtype='int64')
     # END MultiDatasetFix.crossval_setup
 
     def fold_sample( self, num_items, folds, random_gen=False):
@@ -367,60 +343,101 @@ class ColorClouds(Dataset):
         return maxsamples
     # END .get_max_samples
 
-    def __getitem__(self, idx):
+    def __getitem__(self, index):
         
-        #if utils.is_int(idx):
-        #    idx = [idx]
-        #elif type(idx) is slice:
-        #    print('here', type(idx))
-        #    print(idx)
-        #    idx = list(range(idx.start or 0, idx.stop or len(self.NT), idx.step or 1))
+        if utils.is_int(index):
+            index = [index]
+        elif type(index) is slice:
+            index = list(range(index.start or 0, index.stop or len(self.block_inds), index.step or 1))
 
-        #inds = self.valid_inds[idx]  # leave using valid to something else -- leave validating idx to fitting
-        if self.preload:
+        stim = []
+        robs = []
+        dfs = []
+        Xfix = []
+        fixation_labels = []
+        #num_dims = self.stim_dims[0]*self.stim_dims[1]*self.stim_dims[2]
+        num_dims = self.dims[0]*self.dims[1]*self.dims[2]
+        
+        for ii in index:
+            inds = self.block_inds[ii]
+            NT = len(inds)
+            fix_n = self.fix_n[ii]  # which fixation, across all datasets
 
-            if self.time_embed == 1:
-                print("get_item time embedding not implemented yet")    
+            if self.preload:
+                stim_tmp = self.stim[inds,:]
+                robs_tmp = self.robs[inds,:]
+                dfs_tmp = self.dfs[inds,:]
+
             else:
-                out = {'stim': self.stim[idx, :],
-                    'robs': self.robs[idx, :],
-                    'dfs': self.dfs[idx, :],
-                    'fix_n': self.fix_n[idx]}
-                    # missing saccade timing vector -- not specified
+                f = self.file_index[ii]
+                """ Stim """
+                stim_tmp = torch.tensor(self.fhandles[f]['stim'][inds,:], dtype=torch.float32)
+                # reshape and flatten stim: currently its NT x NX x NY x Nclrs
+                stim_tmp = stim_tmp.permute([0,3,1,2]).reshape([-1, num_dims])
 
-        else:
-            inds = self.valid_inds[idx]
-            stim = []
-            robs = []
-            dfs = []
-            num_dims = self.dims[0]*self.dims[1]*self.dims[2]
-
-            """ Stim """
-            # need file handle
-            f = 0
-            #f = self.file_index[inds]  # problem is this could span across several files
-
-            stim = torch.tensor(self.fhandles[f]['stim'][inds,:], dtype=torch.float32)
-            # reshape and flatten stim: currently its NT x NX x NY x Nclrs
-            stim = stim.permute([0,3,1,2]).reshape([-1, num_dims])
-                
-            """ Spikes: needs padding so all are B x NC """ 
-            robs = torch.tensor(self.fhandles[f]['Robs'][inds,:], dtype=torch.float32)
-            if self.include_MUs:
-                robs = torch.cat(
-                    (robs, torch.tensor(self.fhandles[f]['RobsMU'][inds,:], dtype=torch.float32)), 
-                    dim=1)
+                """ Spikes: needs padding so all are B x NC """ 
+                robs_tmp = torch.tensor(self.fhandles[f]['Robs'][inds,:], dtype=torch.float32)
+                if self.include_MUs:
+                    robs_tmp = torch.cat(
+                        (robs_tmp,
+                        torch.tensor(self.fhandles[f]['RobsMU'][inds,:], dtype=torch.float32)), 
+                        dim=1)
 
                 """ Datafilters: needs padding like robs """
-            dfs = torch.tensor(self.fhandles[f]['DFs'][inds,:], dtype=torch.float32)
-            if self.include_MUs:
-                dfs = torch.cat(
-                    (dfs, torch.tensor(self.fhandles[f]['DFsMU'][inds,:], dtype=torch.float32)),
-                    dim=1)
+                dfs_tmp = torch.tensor(self.fhandles[f]['DFs'][inds,:], dtype=torch.float32)
+                if self.include_MUs:
+                    dfs_tmp = torch.cat(
+                        (dfs_tmp,
+                        torch.tensor(self.fhandles[f]['DFsMU'][inds,:], dtype=torch.float32)),
+                        dim=1)
 
-            out = {'stim': stim, 'robs': robs, 'dfs': dfs, 'fix_n': self.fix_n[inds]}
+            """ Additional processing within fixation"""
+            """ Stim """
+            if self.eyepos is not None:
+                stim_tmp = self.shift_stim_fixation( stim_tmp, self.eyepos[fix_n] )
 
-        return out                
+            """ Spikes: needs padding so all are B x NC """ 
+            #NCbefore = int(np.asarray(self.num_units[:f]).sum())
+            #NCafter = int(np.asarray(self.num_units[f+1:]).sum())
+            #robs_tmp = torch.cat(
+            #    (torch.zeros( (NT, NCbefore), dtype=torch.float32),
+            #    robs_tmp,
+            #    torch.zeros( (NT, NCafter), dtype=torch.float32)),
+            #    dim=1)
+
+            dfs_tmp[:self.num_lags,:] = 0 # invalidate the filter length
+            #dfs_tmp = torch.cat(
+            #    (torch.zeros( (NT, NCbefore), dtype=torch.float32),
+            #    dfs_tmp,
+            #    torch.zeros( (NT, NCafter), dtype=torch.float32)),
+            #    dim=1)
+
+            """ Fixation Xstim """
+            # Do we need fixation-Xstim or simply index for array? Let's assume Xstim
+            if self.generate_Xfix:
+                fix_tmp = torch.zeros( (NT, self.num_fixations), dtype=torch.float32)
+                fix_tmp[:, fix_n] = 1.0
+                Xfix.append(fix_tmp)
+            else:
+                #fix_tmp = torch.ones(NT, dtype=torch.float32) * fix_n
+                #fixation_labels.append(fix_tmp.int())
+                fixation_labels.append(torch.ones(NT, dtype=torch.int64) * fix_n)
+    
+            stim.append(stim_tmp)
+            robs.append(robs_tmp)
+            dfs.append(dfs_tmp)
+
+        stim = torch.cat(stim, dim=0)
+        robs = torch.cat(robs, dim=0)
+        dfs = torch.cat(dfs, dim=0)
+
+        if self.generate_Xfix:
+            Xfix = torch.cat(Xfix, dim=0)
+            return {'stim': stim, 'robs': robs, 'dfs': dfs, 'Xfix': Xfix}
+        else:
+            fixation_labels = torch.cat(fixation_labels, dim=0)
+            return {'stim': stim, 'robs': robs, 'dfs': dfs, 'fix_n': fixation_labels}
 
     def __len__(self):
-        return len(self.valid_inds)
+        return len(self.block_inds)
+
