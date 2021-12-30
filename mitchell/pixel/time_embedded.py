@@ -351,13 +351,15 @@ class Pixel(Dataset):
 
         return valid
     
-    def get_fixation_indices(self):
+    def get_fixation_indices(self, index_valid=False):
         fixations = []
         for sess in self.sess_list:
             for stim in self.stim_indices[sess].keys():
                 for ii in range(len(self.stim_indices[sess][stim]['fix_start'])):
                     fix_inds = np.arange(self.stim_indices[sess][stim]['fix_start'][ii], 
                     self.stim_indices[sess][stim]['fix_stop'][ii])
+                    if index_valid:
+                        fix_inds = np.where(np.in1d(self.valid_idx, fix_inds))[0]
                     fixations.append(fix_inds)
         
         return fixations
@@ -379,11 +381,12 @@ class Pixel(Dataset):
 
         return train_inds, val_inds
     
-    def get_stas(self, device=None, batch_size=1000):
+    def get_stas(self, train_loader=None, device=None, batch_size=1000):
         from torch.utils.data import DataLoader
         from tqdm import tqdm
         
-        train_loader = DataLoader(self, batch_size=batch_size, shuffle=False, num_workers=int(os.cpu_count()//2))
+        if train_loader is None:
+            train_loader = DataLoader(self, batch_size=batch_size, shuffle=False, num_workers=int(os.cpu_count()//2))
 
         if device is None:
             device = torch.device('cpu')
