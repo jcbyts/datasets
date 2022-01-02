@@ -21,6 +21,7 @@ class Pixel(Dataset):
         downsample_t:int=1,
         verbose=False,
         download=False,
+        covariate_requests={},
         device=torch.device('cpu'),
     ):
 
@@ -116,13 +117,14 @@ class Pixel(Dataset):
                     self.stim_indices[expt][stim]['fix_start'] = fix_starts + runninglength
                     self.stim_indices[expt][stim]['fix_stop'] = fix_stops + runninglength
 
-                    self.valid_idx.append(runninglength + self.get_valid_indices(self.fhandles[expt], expt, stim))
-
                     # basic info
                     self.stim_indices[expt][stim]['frate'] = fhandle[stim][stimset]['Stim'].attrs['frate'][0]
                     self.stim_indices[expt][stim]['ppd'] = fhandle[stim][stimset]['Stim'].attrs['ppd'][0]
                     self.stim_indices[expt][stim]['rect'] = fhandle[stim][stimset]['Stim'].attrs['rect']
                     self.stim_indices[expt][stim]['center'] = fhandle[stim][stimset]['Stim'].attrs['center']
+
+                    # valid indices
+                    self.valid_idx.append(runninglength + self.get_valid_indices(self.fhandles[expt], expt, stim))
 
                     runninglength += sz[-1]
                     
@@ -150,6 +152,10 @@ class Pixel(Dataset):
 
         self._crop_idx = [0, self.dims[1], 0, self.dims[2]]
 
+        if 'fixation_num' in covariate_requests:
+            fix_inds = self.get_fixation_indices()
+            self
+
     @property
     def crop_idx(self):
         return self._crop_idx
@@ -161,11 +167,13 @@ class Pixel(Dataset):
         self.dims[2] = self._crop_idx[3] - self._crop_idx[2]
 
     def to_tensor(self, device):
-        self.stim = torch.tensor(self.stim, dtype=self.dtype, device=device)
-        self.robs = torch.tensor(self.robs.astype('float32'), dtype=self.dtype, device=device)
-        self.dfs = torch.tensor(self.dfs.astype('float32'), dtype=self.dtype, device=device)
-        self.eyepos = torch.tensor(self.eyepos.astype('float32'), dtype=self.dtype, device=device)
-        self.frame_times = torch.tensor(self.frame_times.astype('float32'), dtype=self.dtype, device=device)
+        for cov in self.covariates.keys():
+            self.covariates[cov] = torch.from_numpy(self.covariates[cov].astype('float32')).to(device)
+        # self.stim = torch.tensor(self.stim, dtype=self.dtype, device=device)
+        # self.robs = torch.tensor(self.robs.astype('float32'), dtype=self.dtype, device=device)
+        # self.dfs = torch.tensor(self.dfs.astype('float32'), dtype=self.dtype, device=device)
+        # self.eyepos = torch.tensor(self.eyepos.astype('float32'), dtype=self.dtype, device=device)
+        # self.frame_times = torch.tensor(self.frame_times.astype('float32'), dtype=self.dtype, device=device)
 
     def preload_numpy(self):
         
@@ -173,11 +181,11 @@ class Pixel(Dataset):
         ''' 
         Pre-allocate memory for data
         '''
-        self.stim = np.zeros(  self.dims + [runninglength], dtype=np.float32)
-        self.robs = np.zeros(  [runninglength, self.NC], dtype=np.float32)
-        self.dfs = np.zeros(   [runninglength, self.NC], dtype=np.float32)
-        self.eyepos = np.zeros([runninglength, 2], dtype=np.float32)
-        self.frame_times = np.zeros([runninglength,1], dtype=np.float32)
+        self.covariates = {'stim': np.zeros(  self.dims + [runninglength], dtype=np.float32),
+                'robs': np.zeros(  [runninglength, self.NC], dtype=np.float32),
+                'dfs': np.zeros(   [runninglength, self.NC], dtype=np.float32),
+                'eyepos': np.zeros([runninglength, 2], dtype=np.float32),
+                'frame_times': np.zeros([runninglength,1], dtype=np.float32)}
 
         for expt in self.sess_list:
             
@@ -190,8 +198,8 @@ class Pixel(Dataset):
                     sz = fhandle[stim][self.stimset]['Stim'].shape
                     inds = self.stim_indices[expt][stim]['inds']
 
-                    self.stim[0, :sz[0], :sz[1], inds] = np.transpose(fhandle[stim][self.stimset]['Stim'][...], [2,0,1])
-                    self.frame_times[inds] = fhandle[stim][self.stimset]['frameTimesOe'][...].T
+                    self.covariates['stim'][0, :sz[0], :sz[1], inds] = np.transpose(fhandle[stim][self.stimset]['Stim'][...], [2,0,1])
+                    self.covariates['frame_times'][inds] = fhandle[stim][self.stimset]['frameTimesOe'][...].T
 
                     """ EYE POSITION """
                     ppd = fhandle[stim][self.stimset]['Stim'].attrs['ppd'][0]
@@ -200,10 +208,10 @@ class Pixel(Dataset):
                     eye_tmp[:,0] -= centerpix[0]
                     eye_tmp[:,1] -= centerpix[1]
                     eye_tmp/= ppd
-                    self.eyepos[inds,:] = eye_tmp
+                    self.covariates['eyepos'][inds,:] = eye_tmp
 
                     """ SPIKES """
-                    frame_times = self.frame_times[inds].flatten()
+                    frame_times = self.covariates['frame_times'][inds].flatten()
 
                     spike_inds = np.where(np.logical_and(
                         fhandle['Neurons'][self.spike_sorting]['times']>=frame_times[0],
@@ -231,12 +239,12 @@ class Pixel(Dataset):
                         robs_tmp = robs_tmp[good,:]
                         inds = inds[good]
 
-                    self.robs[inds,:] = robs_tmp
+                    self.covariates['robs'][inds,:] = robs_tmp
 
                     """ DATAFILTERS """
                     unit_ids = self.spike_indices[expt]['unit ids']
                     for unit in unit_ids:
-                        self.dfs[inds, unit] = 1
+                        self.covariates['dfs'][inds, unit] = 1
 
 
         
@@ -296,8 +304,8 @@ class Pixel(Dataset):
                     print("Correcting stim [%s]" % stim)
                     inds = self.stim_indices[sess][stim]['inds']
 
-                    shift = shifters[sess](self.eyepos[inds,:])
-                    self.stim[...,inds] = shift_im(self.stim[...,inds].permute(3,0,1,2), shift).permute(1,2,3,0)
+                    shift = shifters[sess](self.covariates['eyepos'][inds,:])
+                    self.covariates['stim'][...,inds] = shift_im(self.covariates['stim'][...,inds].permute(3,0,1,2), shift).permute(1,2,3,0)
                     self.stim_indices[sess][stim]['corrected'] = True
         
         if verbose:
@@ -410,9 +418,11 @@ class Pixel(Dataset):
         return len(self.valid_idx)
     
     def __getitem__(self, idx):
-
-        s = self.stim[:,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3],self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
-        # s = self.stim[..., self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
+        
+        if self.shift is not None: # crop stimulus after shifting (slower if no shifting)
+            s = self.covariates['stim'][..., self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
+        else: # crop stimulus on load
+            s = self.covariates['stim'][:,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3],self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
         
         if not isinstance(s, torch.Tensor):
             s = torch.tensor(s.astype('float32'))
@@ -424,16 +434,16 @@ class Pixel(Dataset):
             if len(s.shape)==5:
                 s = shift_im(s.permute(3,4,0,1,2).reshape([-1] + self.dims),
                         self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([-1] + [self.num_lags] + self.dims).permute(0,2,3,4,1)
+                # apply crop after shifting
+                s = s[...,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3], :]
             else:
                 s = shift_im(s.permute(3,0,1,2).reshape([-1] + self.dims),
                         self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([self.num_lags] + self.dims).permute(1,2,3,0)
 
-        # s = s[...,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3], :]
-
-        out = {'stim': s,
-            'robs': self.robs[self.valid_idx[idx],:],
-            'dfs': self.dfs[self.valid_idx[idx],:],
-            'eyepos': self.eyepos[self.valid_idx[idx],:],
-            'frame_times': self.frame_times[self.valid_idx[idx],:]}
+        out = {'stim': s} # stim has already been processed
+        covs = list(self.covariates.keys())
+        covs.remove('stim')
+        for cov in covs:
+            out[cov] = self.covariates[cov][self.valid_idx[idx],:]
 
         return out

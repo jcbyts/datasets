@@ -4,35 +4,36 @@ from torch.utils.data import Dataset
 
 
 class GenericDataset(Dataset):
-
+    '''
+    Generic Dataset can be used to create a quick pytorch dataset from a dictionary of tensors
+    
+    Inputs:
+        Data: Dictionary of tensors. Each key will be a covariate for the dataset.
+        device: Device to put each tensor on. Default is cpu.
+    '''
     def __init__(self,
-        stim,
-        robs,
-        dfs=None,
+        data,
         device=None):
 
-        self.stim = stim
-        self.robs = robs
-        self.dfs = dfs
+        self.covariates = {}
+        for cov in list(data.keys()):
+            self.covariates[cov] = data[cov]
 
         if device is None:
             device = torch.device('cpu')
         
         self.device = device
 
-        if len(stim.shape) > 3:
-            self.stim = self.stim.contiguous(memory_format=torch.channels_last)
+        if len(self.covariates['stim'].shape) > 3:
+            self.covariates['stim'] = self.covariates['stim'].contiguous(memory_format=torch.channels_last)
 
-        self.stim = self.stim.to(device)
-        self.robs = self.robs.to(device)
-        self.dfs = self.dfs.to(device)
-        
+        self.cov_list = list(self.covariates.keys())
+        for cov in self.cov_list:
+            self.covariates[cov] = self.covariates[cov].to(self.device)
         
     def __len__(self):
 
-        return self.stim.shape[0]
+        return self.covariates['stim'].shape[0]
 
     def __getitem__(self, index):
-        return {'stim': self.stim[index,...],
-            'robs': self.robs[index,...],
-            'dfs': self.dfs[index,...]}
+        return {cov: self.covariates[cov][index,...] for cov in self.cov_list}
