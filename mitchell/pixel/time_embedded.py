@@ -8,6 +8,14 @@ from .utils import get_stim_list, download_set
 from datasets.mitchell.pixel.utils import shift_im
 
 class Pixel(Dataset):
+    '''
+    Optional Covariates:
+    'fixation_onset': onset of fixation
+            'tent_ctrs' - array of tent centers
+    'frame_tent':
+            'ntents' - number of tent centers
+        
+    '''
     
     def __init__(self,
         dirname,
@@ -21,15 +29,16 @@ class Pixel(Dataset):
         downsample_t:int=1,
         verbose=False,
         download=False,
-        covariate_requests={},
+        covariate_requests={}, # fixation_num, fixation_onset
         device=torch.device('cpu'),
     ):
-
+    
         super().__init__()
 
         self.stimset = stimset
         self.requested_stims = requested_stims
         self.spike_sorting = 'kilowf' # only one option for now
+        self.downsample_t = downsample_t
         self.num_lags = num_lags
 
         self.fixations_only = fixations_only
@@ -37,11 +46,7 @@ class Pixel(Dataset):
             self.pad_fix_start = self.num_lags # pad by the number of stimulus lags
 
         self.valid_eye_rad = valid_eye_rad
-        self.downsample_t = downsample_t
-        if self.downsample_t > 1:
-            Warning("Downsampling time by %d not implemented yet. resetting to 1" % self.downsample_t)
-            self.downsample_t = 1
-
+        
         self.normalizing_constant = 50
 
         # find valid sessions
@@ -139,6 +144,70 @@ class Pixel(Dataset):
         print("Loading data...")
         self.preload_numpy()
 
+        # Handle requested covariates
+        if 'fixation_num' in covariate_requests.keys():
+            print("Loading fixation number covariate...")
+            fix_inds = self.get_fixation_indices()
+            self.covariates['fixation_num'] = np.zeros((self.covariates['stim'].shape[-1], 1))
+            for num, fix in enumerate(fix_inds):
+                self.covariates['fixation_num'][fix] = num
+            print("Done")
+
+        if 'fixation_onset' in covariate_requests.keys():
+            print("Loading fixation onset covariate...")
+            fix_inds = self.get_fixation_indices()
+            fix_start = [fix[0] for fix in fix_inds]
+            # nfix = len(fix_start)
+
+            ctrs = covariate_requests['fixation_onset']['tent_ctrs']
+            step = np.mean(np.diff(ctrs)/2)
+            nlags = len(ctrs)
+
+            sacstim = np.zeros((self.covariates['stim'].shape[-1], 1))
+            sacstim[fix_start] = 1
+
+            # make basis
+            off = ctrs[0] - step
+            if step >= 1:
+                dt = 1 # assuming frame id instead of seconds
+            else:
+                dt = np.median(np.abs(np.diff(self.covariates['frame_times'], axis=0)))
+            t = np.arange(off, ctrs[-1] + step, dt)
+            B = np.maximum(0, 1-np.abs(t[:,None] - ctrs)/step)
+            roll = int(np.round(off/dt))
+            sacstim = np.roll(sacstim, roll, axis=0)
+
+            # zero out invalid after shift
+            if off < 0:
+                sacstim[roll:,0] = 0
+            elif off > 0:
+                sacstim[:roll,0] = 0
+                    
+            # convolve with basis
+            from scipy.signal import fftconvolve
+            sacfull = fftconvolve(sacstim, B, mode="full")
+
+            self.covariates['fixation_onset'] = sacfull[:self.covariates['stim'].shape[-1],:]
+            self.fixation_onset_ctrs = ctrs
+            print("Done")
+            
+        if 'frame_tent' in covariate_requests.keys():
+            print("Loading frame tent covariate...")
+            ntents = covariate_requests['frame_tent']['ntents']
+            ctrs = np.linspace(self.covariates['frame_times'].min(), self.covariates['frame_times'].max(), ntents)
+            step = np.mean(np.diff(ctrs)/2)
+            nlags = len(ctrs)
+
+            self.covariates['frame_tent'] = np.zeros((self.covariates['stim'].shape[-1], nlags))
+            
+            x = np.abs(self.covariates['frame_times'] - ctrs)
+            x = np.maximum(0, ( 1-x/step ))
+    
+            self.covariates['frame_tent'] = x
+            self.frame_tent_ctrs = ctrs
+            print("Done")
+            
+            
         if device is not None:
             self.to_tensor(device)
             
@@ -152,9 +221,13 @@ class Pixel(Dataset):
 
         self._crop_idx = [0, self.dims[1], 0, self.dims[2]]
 
-        if 'fixation_num' in covariate_requests:
-            fix_inds = self.get_fixation_indices()
-            self
+    @property
+    def num_lags(self):
+        return self._num_lags//self.downsample_t
+    
+    @num_lags.setter
+    def num_lags(self, value):
+        self._num_lags = value*self.downsample_t
 
     @property
     def crop_idx(self):
@@ -389,12 +462,16 @@ class Pixel(Dataset):
 
         return train_inds, val_inds
     
-    def get_stas(self, train_loader=None, device=None, batch_size=1000):
-        from torch.utils.data import DataLoader
+    def get_stas(self, train_loader=None, device=None, batch_size=1000, inds=None, square=False):
+        from torch.utils.data import DataLoader, Subset
         from tqdm import tqdm
         
         if train_loader is None:
-            train_loader = DataLoader(self, batch_size=batch_size, shuffle=False, num_workers=int(os.cpu_count()//2))
+            if inds is None:
+                train_loader = DataLoader(self, batch_size=batch_size, shuffle=False, num_workers=int(os.cpu_count()//2))
+            else:
+                ds = Subset(self, inds)
+                train_loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=int(os.cpu_count()//2))
 
         if device is None:
             device = torch.device('cpu')
@@ -402,7 +479,9 @@ class Pixel(Dataset):
         xy = 0
         ny = 0
         for data in tqdm(train_loader):
-            x = torch.flatten(data['stim'], start_dim=1)    
+            x = torch.flatten(data['stim'], start_dim=1)
+            if square:
+                x=x**2
             y = data['robs']*data['dfs']
             x = x.to(device)
             y = y.to(device)
@@ -414,15 +493,82 @@ class Pixel(Dataset):
 
         return stas
 
+    def compute_datafilters(self, batch_size=1000, sd_thresh=2):
+        
+        import os
+        r = [] # m
+        rsd = []
+        ft = []
+        ftend = []
+
+        NT = self.covariates['robs'].shape[0]
+        nbatch = NT // batch_size
+        r = []
+        for i in range(nbatch):
+            rtmp = self.covariates['robs'][range(i*batch_size, i*batch_size+batch_size),:]
+            r.append(rtmp.mean(dim=0).detach().numpy())
+            rsd.append(rtmp.std(dim=0).detach().numpy())
+            ft.append(self.covariates['frame_times'][i*batch_size].detach().numpy())
+            ftend.append(self.covariates['frame_times'][i*batch_size+batch_size].detach().numpy())
+
+        ft = np.asarray(ft).flatten()
+        ftend = np.asarray(ftend).flatten()
+        r = np.asarray(r)
+        rsd = np.asarray(rsd)
+
+        z0 = np.mean(rsd, axis=0)
+        z1 = np.std(rsd, axis=0)
+        zs = (rsd - z0)/z1
+
+        dfs = np.logical_and(zs > -sd_thresh, zs < sd_thresh)
+        dfs[np.sum(dfs, axis=1)<.9*rsd.shape[1],:] = False
+        dfs[r==0] = False
+
+        bad_epochs_start = []
+        bad_epochs_stop = []
+        for cc in range(self.NC):
+            ii = np.where(~dfs[:,cc])[0]
+            
+            bad_epochs_start.append(ft[ii])
+            bad_epochs_stop.append(ftend[ii])
+
+        frame_times = self.covariates['frame_times'].clone()
+
+        big_dfs = self.covariates['dfs'].clone()
+        for cc in range(self.NC):
+            for epoch_start, epoch_stop in zip(bad_epochs_start[cc], bad_epochs_stop[cc]):
+                
+                bad = np.where(np.logical_and(frame_times > epoch_start, frame_times < epoch_stop))[0]
+                big_dfs[bad,cc]=0
+        
+        self.covariates['dfs'] = big_dfs
+        # remove bad valid indices
+        iix = np.where((big_dfs[self.valid_idx,:].sum(dim=1)==0).numpy())[0]
+        self.valid_idx = np.delete(self.valid_idx, iix)
+
+
     def __len__(self):
         return len(self.valid_idx)
     
     def __getitem__(self, idx):
         
         if self.shift is not None: # crop stimulus after shifting (slower if no shifting)
-            s = self.covariates['stim'][..., self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
+            if self.downsample_t > 1:
+                s = 0
+                for t in range(self.downsample_t):
+                    s += self.covariates['stim'][...,self.valid_idx[idx,None]-np.arange(t, self._num_lags, self.downsample_t)]/self.normalizing_constant
+                s = s/self.downsample_t
+            else:
+                s = self.covariates['stim'][..., self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
+                
         else: # crop stimulus on load
-            s = self.covariates['stim'][:,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3],self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
+            if self.downsample_t > 1:
+                s = 0
+                for t in range(self.downsample_t):
+                    s += self.covariates['stim'][:,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3],self.valid_idx[idx,None]-np.arange(t, self._num_lags, self.downsample_t)]/self.normalizing_constant
+                s = s/self.downsample_t
+            else:
+                s = self.covariates['stim'][:,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3],self.valid_idx[idx,None]-range(self._num_lags)]/self.normalizing_constant
         
         if not isinstance(s, torch.Tensor):
             s = torch.tensor(s.astype('float32'))
@@ -431,14 +577,25 @@ class Pixel(Dataset):
                 s = s.permute(3,0,1,2,4) # N, C, H, W, T
         
         if self.shift is not None:
-            if len(s.shape)==5:
-                s = shift_im(s.permute(3,4,0,1,2).reshape([-1] + self.dims),
-                        self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([-1] + [self.num_lags] + self.dims).permute(0,2,3,4,1)
-                # apply crop after shifting
-                s = s[...,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3], :]
+            sz = list(s.shape)
+            if self.downsample_t > 1:
+                lagged_shift = 0
+                for t in range(self.downsample_t):
+                    lagged_shift = self.shift[self.valid_idx[idx,None]-np.arange(t, self._num_lags, self.downsample_t),:]
+                lagged_shift /= self.downsample_t
+                lagged_shift = lagged_shift.reshape([-1, 2])
             else:
-                s = shift_im(s.permute(3,0,1,2).reshape([-1] + self.dims),
-                        self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([self.num_lags] + self.dims).permute(1,2,3,0)
+                lagged_shift = self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])
+
+            if len(sz)==5:
+                s = shift_im(s.permute(3,4,0,1,2).reshape([-1] + sz[1:4]),
+                        lagged_shift).reshape([-1] + [self.num_lags] + sz[1:4]).permute(0,2,3,4,1)
+            else:
+                s = shift_im(s.permute(3,0,1,2).reshape([-1] + sz[0:3]),
+                        self.shift[self.valid_idx[idx,None]-range(self.num_lags),:].reshape([-1,2])).reshape([self.num_lags] + sz[0:3]).permute(1,2,3,0)
+            
+            # apply crop after shifting
+            s = s[...,self.crop_idx[0]:self.crop_idx[1], self.crop_idx[2]:self.crop_idx[3], :]
 
         out = {'stim': s} # stim has already been processed
         covs = list(self.covariates.keys())
