@@ -67,7 +67,9 @@ class ColorClouds(Dataset):
         self.include_MUs = include_MUs
         self.SUinds = []
         self.MUinds = []
-    
+        
+        self.cells_out = []  # can be list to output specific cells in get_item
+
         # Set up to store default train_, val_, test_inds
         self.test_inds = None
         self.val_inds = None
@@ -369,25 +371,26 @@ class ColorClouds(Dataset):
 
     def __getitem__(self, idx):
         
-        #if utils.is_int(idx):
-        #    idx = [idx]
-        #elif type(idx) is slice:
-        #    print('here', type(idx))
-        #    print(idx)
-        #    idx = list(range(idx.start or 0, idx.stop or len(self.NT), idx.step or 1))
-
-        #inds = self.valid_inds[idx]  # leave using valid to something else -- leave validating idx to fitting
         if self.preload:
 
             if self.time_embed == 1:
                 print("get_item time embedding not implemented yet")    
             else:
-                out = {'stim': self.stim[idx, :],
-                    'robs': self.robs[idx, :],
-                    'dfs': self.dfs[idx, :],
-                    'fix_n': self.fix_n[idx]}
-                    # missing saccade timing vector -- not specified
-
+                if len(self.cells_out) == 0:
+                    out = {'stim': self.stim[idx, :],
+                        'robs': self.robs[idx, :],
+                        'dfs': self.dfs[idx, :],
+                        'fix_n': self.fix_n[idx]}
+                        # missing saccade timing vector -- not specified
+                else:
+                    assert isinstance(self.cells_out, list), 'cells_out must be a list'
+                    robs_tmp =  self.robs[:, self.cells_out]
+                    dfs_tmp =  self.dfs[:, self.cells_out]
+                    out = {'stim': self.stim[idx, :],
+                        'robs': robs_tmp[idx, :],
+                        'dfs': dfs_tmp[idx, :],
+                        'fix_n': self.fix_n[idx]}
+            
         else:
             inds = self.valid_inds[idx]
             stim = []
