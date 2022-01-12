@@ -155,7 +155,7 @@ class MultiDataset(Dataset):
         if type(index) is int:
             index = [index]
         elif type(index) is slice:
-            index = list(range(index.start or 0, index.stop or len(self.block_inds), index.step or 1))
+            index = list(range(index.start or 0, index.stop or self.NT, index.step or 1))
 
         if self.preload:
             stim = self.stim[index, :]
