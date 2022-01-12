@@ -6,11 +6,12 @@ import scipy.io as sio
 import torch
 from torch.utils.data import Dataset
 
-import NDNT.utils as NDNutils
+import NDNT.utils as utils
 
 from ..utils import download_file, ensure_dir
 from copy import deepcopy
 import h5py
+
 class MultiDataset(Dataset):
     """
     MULTIDATASET can load batches from multiple datasets
@@ -18,8 +19,12 @@ class MultiDataset(Dataset):
 
     def __init__(self,
         sess_list,
-        dirname, 
-        num_lags=1):
+        dirname,
+        preload=False,
+        num_lags=1,
+        time_embed=True,
+        includeMUs=False,
+        device=None):
 
         self.dirname = dirname
         self.sess_list = sess_list
@@ -31,21 +36,38 @@ class MultiDataset(Dataset):
         # build index map
         self.file_index = [] # which file the block corresponds to
         self.block_inds = []
+        self.NTfile = []
 
         self.unit_ids = []
+        self.includeMUs = includeMUs
         self.num_units = []
+        self.dims_file = []
+
+        if (device is not None) and (not preload):
+            preload = True
+            print("Warning: switching preload to True so device argument is meaningful.")
+        
+        self.preload = preload
+        self.device = device
+
+        self.NT = 0
         self.NC = 0       
-        self.dims = []
+        self.num_blocks = 0
+        self.block_assign = []
+        self.block_grouping = []
+        nfiles = 0
 
         for f, fhandle in enumerate(self.fhandles):
+            NTfile = fhandle['robs'].shape[0]
             NCfile = fhandle['robs'].shape[1]
-            self.dims.append(fhandle['stim'].shape[1])
+            
+            self.dims_file.append(fhandle['stim'].shape[1])
             self.unit_ids.append(self.NC + np.asarray(range(NCfile)))
             self.num_units.append(NCfile)
-            self.NC += NCfile
 
-            NT = fhandle['robs'].shape[0]
+            self.NTfile.append(NTfile)
 
+            # Pull blocks from data_filters
             blocks = (np.sum(fhandle['dfs'][:,:], axis=1)==0).astype(np.float32)
             blocks[0] = 1 # set invalid first sample
             blocks[-1] = 1 # set invalid last sample
@@ -56,9 +78,77 @@ class MultiDataset(Dataset):
 
             for b in range(nblocks):
                 self.file_index.append(f)
-                self.block_inds.append(np.arange(blockstart[b], blockend[b]))
+                self.block_inds.append(self.NT + np.arange(blockstart[b], blockend[b]))
+            
+            # Assign each block to a file
+            self.block_assign = np.concatenate(
+                (self.block_assign, nfiles*np.ones(NTfile, dtype=int)), axis=0)
+            self.block_grouping.append( self.num_blocks+np.arange(nblocks, dtype=int) )
+            self.NT += NTfile
+            self.NC += NCfile
+            self.num_blocks += nblocks
+            nfiles += 1
 
-        self.dims = np.unique(np.asarray(self.dims)) # assumes they're all the same
+        # Set overall dataset variables
+        NX = np.unique(np.asarray(self.dims_file)) # assumes they're all the same
+        assert len(NX) == 1, 'problems'
+        self.dims = [NX[0], 1, 1]
+        if time_embed:
+            self.dims[-1] = num_lags
+
+        if preload:
+            self.stim = np.zeros([self.NT, np.prod(self.dims)], dtype=np.float32)
+            self.robs = np.zeros([self.NT, self.NC], dtype=np.float32)
+            self.dfs = np.zeros([self.NT, self.NC], dtype=np.float32)
+            tcount, ccount = 0, 0
+            for f, fhandle in enumerate(self.fhandles):
+                NT = fhandle['robs'].shape[0]
+                NC = fhandle['robs'].shape[1]
+                trange = range(tcount, tcount+NT)
+                crange = range(ccount, ccount+NC)
+
+                # Stimulus
+                if not time_embed:
+                    self.stim[trange, :] = np.array(self.fhandles[f]['stim'], dtype='float32')
+                else:
+                    # Time embed stimulus -- simple way
+                    idx = np.arange(NT)
+                    tmp = np.array(self.fhandles[f]['stim'], dtype='float32')
+                    self.stim[trange, :] = np.reshape( 
+                        np.transpose(
+                            tmp[np.arange(NT)[:,None]-np.arange(self.num_lags), :], 
+                            [0,2,1]),
+                        [NT, -1])
+
+                # Robs and DFs
+                robs_tmp = np.zeros([NT, self.NC], dtype=np.float32)
+                dfs_tmp = np.zeros([NT, self.NC], dtype=np.float32)
+                robs_tmp[:, crange] = np.array(self.fhandles[f]['robs'], dtype='float32')
+                dfs_tmp[:, crange] = np.array(self.fhandles[f]['dfs'], dtype='float32')
+
+                self.robs[trange, :] = deepcopy(robs_tmp)
+                self.dfs[trange, :] = deepcopy(dfs_tmp)
+                tcount += NT
+                ccount += NC
+
+            # Convert data to tensor
+            self.to_tensor()
+
+            # Set up default cross-validation config
+            self.crossval_setup()
+    # END MultiDataset.__init__
+
+    def to_tensor(self, device=None):
+        if device is None:
+            if self.device is None:
+                device = torch.device("cpu")
+            else:
+                device = self.device
+
+        self.stim = torch.tensor(self.stim, dtype=torch.float32, device=device)
+        self.robs = torch.tensor(self.robs, dtype=torch.float32, device=device)
+        self.dfs = torch.tensor(self.dfs, dtype=torch.float32, device=device)
+    # END MultiDataset.to_tensor
 
     def __getitem__(self, index):
         
@@ -67,132 +157,56 @@ class MultiDataset(Dataset):
         elif type(index) is slice:
             index = list(range(index.start or 0, index.stop or len(self.block_inds), index.step or 1))
 
-        stim = []
-        robs = []
-        dfs = []
-        for ii in index:
-            inds = self.block_inds[ii]
-            NT = len(inds)
-            f = self.file_index[ii]
+        if self.preload:
+            stim = self.stim[index, :]
+            robs = self.robs[index, :]
+            dfs = self.dfs[index, :]
+        else:
+            stim = []
+            robs = []
+            dfs = []
+            for ii in index:
+                inds = self.block_inds[ii]
+                NT = len(inds)
+                f = self.file_index[ii]
 
-            """ Stim """
-            stim_tmp = torch.tensor(self.fhandles[f]['stim'][inds,:], dtype=torch.float32)
+                """ Stim """
+                stim_tmp = torch.tensor(self.fhandles[f]['stim'][inds,:], dtype=torch.float32)
 
-            """ Spikes: needs padding so all are B x NC """ 
-            robs_tmp = torch.tensor(self.fhandles[f]['robs'][inds,:], dtype=torch.float32)
-            NCbefore = int(np.asarray(self.num_units[:f]).sum())
-            NCafter = int(np.asarray(self.num_units[f+1:]).sum())
-            robs_tmp = torch.cat(
-                (torch.zeros( (NT, NCbefore), dtype=torch.float32),
-                robs_tmp,
-                torch.zeros( (NT, NCafter), dtype=torch.float32)),
-                dim=1)
+                """ Spikes: needs padding so all are B x NC """ 
+                robs_tmp = torch.tensor(self.fhandles[f]['robs'][inds,:], dtype=torch.float32)
+                NCbefore = int(np.asarray(self.num_units[:f]).sum())
+                NCafter = int(np.asarray(self.num_units[f+1:]).sum())
+                robs_tmp = torch.cat(
+                    (torch.zeros( (NT, NCbefore), dtype=torch.float32),
+                    robs_tmp,
+                    torch.zeros( (NT, NCafter), dtype=torch.float32)),
+                    dim=1)
 
-            """ Datafilters: needs padding like robs """
-            dfs_tmp = torch.tensor(self.fhandles[f]['dfs'][inds,:], dtype=torch.float32)
-            dfs_tmp[:self.num_lags,:] = 0 # invalidate the filter length
-            dfs_tmp = torch.cat(
-                (torch.zeros( (NT, NCbefore), dtype=torch.float32),
-                dfs_tmp,
-                torch.zeros( (NT, NCafter), dtype=torch.float32)),
-                dim=1)
+                """ Datafilters: needs padding like robs """
+                dfs_tmp = torch.tensor(self.fhandles[f]['dfs'][inds,:], dtype=torch.float32)
+                dfs_tmp[:self.num_lags,:] = 0 # invalidate the filter length
+                dfs_tmp = torch.cat(
+                    (torch.zeros( (NT, NCbefore), dtype=torch.float32),
+                    dfs_tmp,
+                    torch.zeros( (NT, NCafter), dtype=torch.float32)),
+                    dim=1)
 
-            stim.append(stim_tmp)
-            robs.append(robs_tmp)
-            dfs.append(dfs_tmp)
+                stim.append(stim_tmp)
+                robs.append(robs_tmp)
+                dfs.append(dfs_tmp)
 
-        stim = torch.cat(stim, dim=0)
-        robs = torch.cat(robs, dim=0)
-        dfs = torch.cat(dfs, dim=0)
+            stim = torch.cat(stim, dim=0)
+            robs = torch.cat(robs, dim=0)
+            dfs = torch.cat(dfs, dim=0)
 
         return {'stim': stim, 'robs': robs, 'dfs': dfs}
-        
+    # END MultiDataset.__get_item__
 
     def __len__(self):
-        return len(self.block_inds)
-
-
-class MultiDatasetFix(Dataset):
-    """
-    MULTIDATASET-FIX can load batches from multiple datasets
-    Two changes from regular MultiDataset (above):
-    -- technical: uses now-present 'block_inds' variable
-    -- adds fixation-number-Xstim to get_item
-    Might be more clever way rather than duplicating so much code: replace?
-    -- if replace, can have a flag about whether to calc Xfix?
-
-    Constructor will take eye position, which for now is an input from data
-    generated in the session (not on disk). It should have the length size 
-    of the total number of fixations x1.
-    """
-
-    def __init__(self,
-        sess_list,
-        dirname, 
-        num_lags=16,
-        eyepos = None):
-
-        self.dirname = dirname
-        self.sess_list = sess_list
-        self.num_lags = num_lags
-
-        # get hdf5 file handles
-        self.fhandles = [h5py.File(os.path.join(dirname, sess + '.hdf5'), 'r') for sess in self.sess_list]
-
-        # build index map
-        self.file_index = [] # which file the block corresponds to
-        self.block_inds = []
-        self.fix_n = []
-        self.unit_ids = []
-        self.num_units = []
-        self.NC = 0       
-        self.dims = []
-        self.eyepos = eyepos
-        self.generate_Xfix = False
-        self.fixation_grouping = []
-
-        # Set up to store default train_, val_, test_inds
-        self.test_inds = None
-        self.val_inds = None
-        self.train_inds = None
-
-        self.num_fixations = 0
-        for f, fhandle in enumerate(self.fhandles):
-            NCfile = fhandle['robs'].shape[1]
-            self.dims.append(fhandle['stim'].shape[1])
-            self.unit_ids.append(self.NC + np.asarray(range(NCfile)))
-            self.num_units.append(NCfile)
-            self.NC += NCfile
-
-            NT = fhandle['robs'].shape[0]
-
-            #blocks = (np.sum(fhandle['dfs'][:,:], axis=1)==0).astype(np.float32)
-            #blocks[0] = 1 # set invalid first sample
-            #blocks[-1] = 1 # set invalid last sample
-
-            #blockstart = np.where(np.diff(blocks)==-1)[0]
-            #blockend = np.where(np.diff(blocks)==1)[0]
-            blockstart = fhandle['block_inds'][:,0]
-            blockend = fhandle['block_inds'][:,1]
-            nblocks = len(blockstart)
-
-            for b in range(nblocks):
-                self.file_index.append(f)
-                self.block_inds.append(np.arange(blockstart[b], blockend[b]))
-                self.fix_n.append(b+self.num_fixations)
-
-            self.fixation_grouping.append(np.arange(nblocks, dtype='int32')+self.num_fixations)
-            self.num_fixations += nblocks
-
-        self.dims = np.unique(np.asarray(self.dims)) # assumes they're all the same    
-        if self.eyepos is not None:
-            assert len(self.eyepos) == self.num_fixations, \
-                "eyepos input should have %d fixations."%self.num_fixations
-
-        # Develop default train, validation, and test datasets 
-        #self.crossval_setup() 
-    # END MultiDatasetFix.__init__
-
+        return self.NT
+    
+    # Additional functions that might not be useful yet
     def shift_stim_fixation( self, stim, shift):
         """Simple shift by integer (rounded shift) and zero padded. Note that this is not in 
         is in units of number of bars, rather than -1 to +1. It assumes the stim
@@ -209,7 +223,7 @@ class MultiDatasetFix(Dataset):
         return shstim
     # END MultiDatasetFix.shift_stim_fixation
 
-    def crossval_setup(self, folds=5, random_gen=False, test_set=True):
+    def crossval_setup(self, folds=5, random_gen=False, test_set=False):
         """This sets the cross-validation indices up We can add featuers here. Many ways to do this
         but will stick to some standard for now. It sets the internal indices, which can be read out
         directly or with helper functions. Perhaps helper_functions is the best way....
@@ -224,22 +238,38 @@ class MultiDatasetFix(Dataset):
         test_fixes = []
         tfixes = []
         vfixes = []
-        for ee in range(len(self.fixation_grouping)):
-            fix_inds = self.fixation_grouping[ee]
-            vfix1, tfix1 = self.fold_sample(len(fix_inds), folds, random_gen=random_gen)
+        for ee in range(len(self.block_grouping)):
+            blk_inds = self.block_grouping[ee]
+            vfix1, tfix1 = self.fold_sample(len(blk_inds), folds, random_gen=random_gen)
             if test_set:
-                test_fixes += list(fix_inds[vfix1])
+                test_fixes += list(blk_inds[vfix1])
                 vfix2, tfix2 = self.fold_sample(len(tfix1), folds, random_gen=random_gen)
-                vfixes += list(fix_inds[tfix1[vfix2]])
-                tfixes += list(fix_inds[tfix1[tfix2]])
+                vfixes += list(blk_inds[tfix1[vfix2]])
+                tfixes += list(blk_inds[tfix1[tfix2]])
             else:
-                vfixes += list(fix_inds[vfix1])
-                tfixes += list(fix_inds[tfix1])
+                vfixes += list(blk_inds[vfix1])
+                tfixes += list(blk_inds[tfix1])
 
-        self.val_inds = np.array(vfixes, dtype='int64')
-        self.train_inds = np.array(tfixes, dtype='int64')
+        val_blks = np.array(vfixes, dtype='int64')
+        train_blks = np.array(tfixes, dtype='int64')
+        
+        # Assign indexes based on validation by block
+        self.train_inds = []
+        self.test_inds = []
+        self.val_inds = []
+        for bb in train_blks:
+            self.train_inds += list(self.block_inds[bb])
+        for bb in val_blks:
+            self.val_inds += list(self.block_inds[bb])
         if test_set:
-           self.test_inds = np.array(test_fixes, dtype='int64')
+            test_blks = np.array(test_fixes, dtype='int64')
+            for bb in test_blks:
+                self.test_inds += list(self.block_inds[bb])
+
+        # finally convert to np.array
+        self.train_inds = np.array(self.train_inds)
+        self.val_inds = np.array(self.val_inds)
+        self.test_inds = np.array(self.test_inds)
     # END MultiDatasetFix.crossval_setup
 
     def fold_sample( self, num_items, folds, random_gen=False):
@@ -254,164 +284,6 @@ class MultiDatasetFix(Dataset):
             val_items = np.arange(offset, num_items, folds, dtype='int32')
             rem_items = np.delete(np.arange(num_items, dtype='int32'), val_items)
         return val_items, rem_items
-
-    def __getitem__(self, index):
-        
-        if Utils.is_int(index):
-            index = [index]
-        elif type(index) is slice:
-            index = list(range(index.start or 0, index.stop or len(self.block_inds), index.step or 1))
-
-        stim = []
-        robs = []
-        dfs = []
-        Xfix = []
-        fixation_labels = []
-
-        for ii in index:
-            inds = self.block_inds[ii]
-            NT = len(inds)
-            f = self.file_index[ii]
-            fix_n = self.fix_n[ii]  # which fixation, across all datasets
-
-            """ Stim """
-            stim_tmp = torch.tensor(self.fhandles[f]['stim'][inds,:], dtype=torch.float32)
-            if self.eyepos is not None:
-                stim_tmp = self.shift_stim_fixation( stim_tmp, self.eyepos[fix_n] )
-
-            """ Spikes: needs padding so all are B x NC """ 
-            robs_tmp = torch.tensor(self.fhandles[f]['robs'][inds,:], dtype=torch.float32)
-            NCbefore = int(np.asarray(self.num_units[:f]).sum())
-            NCafter = int(np.asarray(self.num_units[f+1:]).sum())
-            robs_tmp = torch.cat(
-                (torch.zeros( (NT, NCbefore), dtype=torch.float32),
-                robs_tmp,
-                torch.zeros( (NT, NCafter), dtype=torch.float32)),
-                dim=1)
-
-            """ Datafilters: needs padding like robs """
-            dfs_tmp = torch.tensor(self.fhandles[f]['dfs'][inds,:], dtype=torch.float32)
-            dfs_tmp[:self.num_lags,:] = 0 # invalidate the filter length
-            dfs_tmp = torch.cat(
-                (torch.zeros( (NT, NCbefore), dtype=torch.float32),
-                dfs_tmp,
-                torch.zeros( (NT, NCafter), dtype=torch.float32)),
-                dim=1)
-
-            """ Fixation Xstim """
-            # Do we need fixation-Xstim or simply index for array? Let's assume Xstim
-            if self.generate_Xfix:
-                fix_tmp = torch.zeros( (NT, self.num_fixations), dtype=torch.float32)
-                fix_tmp[:, fix_n] = 1.0
-                Xfix.append(fix_tmp)
-            else:
-                #fix_tmp = torch.ones(NT, dtype=torch.float32) * fix_n
-                #fixation_labels.append(fix_tmp.int())
-                fixation_labels.append(torch.ones(NT, dtype=torch.int64) * fix_n)
-
-            stim.append(stim_tmp)
-            robs.append(robs_tmp)
-            dfs.append(dfs_tmp)
-
-        stim = torch.cat(stim, dim=0)
-        robs = torch.cat(robs, dim=0)
-        dfs = torch.cat(dfs, dim=0)
-
-        if self.generate_Xfix:
-            Xfix = torch.cat(Xfix, dim=0)
-            return {'stim': stim, 'robs': robs, 'dfs': dfs, 'Xfix': Xfix}
-        else:
-            fixation_labels = torch.cat(fixation_labels, dim=0)
-            return {'stim': stim, 'robs': robs, 'dfs': dfs, 'fix_n': fixation_labels}
-
-    def __len__(self):
-        return len(self.block_inds)
-
-class MonocularDataset(Dataset):
-
-    def __init__(self, sessname='expt04',
-        num_lags=16,
-        stimset='Train',
-        dirname=None,
-        corrected=True,
-        download=True,
-        device=None,
-        dtype=torch.float32):
-        """
-        Monocular V1 1D noise bars
-        Args:
-            sessname: experiment name (default: 'expt04')
-            dirname: where to look for data (THIS IS NECESSARY)
-            num_lags: number of time lags to use (default: 16)
-            stimset: which set of stimuli to load (default: 'Train')
-            corrected: whether to use eye-tracking corrected stimulus (default: True)
-            download: whether to download data if it is missing locally (default: True)
-            device: device to load data onto (default: 'cpu')
-            dtype: data type to load data in (default: torch.float32)
-        """
-        self.stimset = stimset
-        self.corrected = corrected
-        self.num_lags = num_lags
-        self.device = device
-        self.dtype = dtype
-        self.dirname = dirname
-
-        if dirname is None:
-            raise ValueError('dirname must be specified')
-        
-        Utils.ensure_dir(dirname)
-
-        # check if we need to download the data
-        fpath = os.path.join(dirname, sessname + '.mat')
-        if not os.path.exists(fpath):
-            print("File [%s] does not exist. Download set to [%s]" % (fpath, download))
-            if download:
-                print("Downloading set...")
-                download_set(sessname, self.dirname)
-            else:
-                print("Download is False. Exiting...")
-                return
-
-        stim, Robs, datafilters, Eadd_info = monocular_data_import( dirname, sessname, num_lags=num_lags )
-
-        NX = stim.shape[1]
-        Xstim = Utils.create_time_embedding( stim, [num_lags, NX, 1])
-        NT, NC = Robs.shape
-        # For index parsing
-        used_inds = Eadd_info['used_inds']
-        Ui, Xi = Eadd_info['TRinds'], Eadd_info['TEinds']
-        print( "%d SUs, %d / %d used time points"%(NC, len(used_inds), NT) )
-        
-        # map numpy arrays into tensors
-        if stimset=='Train':
-            ix = Ui
-        else:
-            ix = Xi
-
-        self.x = torch.tensor(Xstim[ix,:], dtype=dtype)
-        self.y = torch.tensor(Robs[ix,:], dtype=dtype)
-        if datafilters is not None:
-            self.DFs = torch.tensor(datafilters[ix,:], dtype=dtype)
-        else:
-            self.DFs = torch.ones(Robs[ix,:].shape, dtype=torch.float32)
-        
-        if device:
-            self.x =self.x.to(device)
-            self.y =self.y.to(device)
-            self.DFs =self.DFs.to(device)
-
-        self.NC = Robs.shape[1]
-        self.NX = NX
-        self.NY = 1
-        self.NF = 1
-        
-    def __getitem__(self, index):
-        
-        return {'stim': self.x[index,:], 'robs':self.y[index,:], 'dfs': self.DFs[index,:]}
-        
-    def __len__(self):
-        return self.x.shape[0]
-
 
 
 def get_stim_url(id):
