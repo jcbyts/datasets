@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 
 import NDNT.utils as utils
 
-from ..utils import download_file, ensure_dir
+#from NDNT.utils import download_file, ensure_dir
 from copy import deepcopy
 import h5py
 
@@ -51,7 +51,7 @@ class MultiDataset(Dataset):
         self.device = device
 
         self.NT = 0
-        self.NC = 0       
+        self.NC = 0
         self.num_blocks = 0
         self.block_assign = []
         self.block_grouping = []
@@ -134,8 +134,12 @@ class MultiDataset(Dataset):
             # Convert data to tensor
             self.to_tensor()
 
-            # Set up default cross-validation config
-            self.crossval_setup()
+        # Set average rates across dataset (so can be quickly accessed)
+        self.avRs = None  # need to set to None so can will pre-calculate
+        self.avRs = self.avrates()
+
+        # Set up default cross-validation config
+        self.crossval_setup()
     # END MultiDataset.__init__
 
     def to_tensor(self, device=None):
@@ -206,7 +210,31 @@ class MultiDataset(Dataset):
     def __len__(self):
         return self.NT
     
-    # Additional functions that might not be useful yet
+    ###### Additional functions that might not be useful yet #####
+    def avrates( self, inds=None ):
+        """
+        Calculates average firing probability across specified inds (or whole dataset)
+        -- Note will respect datafilters
+        -- will return precalc value to save time if already stored
+        """
+        if inds is None:
+            inds = range(self.NT)
+        if len(inds) == self.NT:
+            # then calculate across whole dataset
+            if self.avRs is not None:
+                # then precalculated and do not need to do
+                return self.avRs
+
+        # Otherwise calculate across all data
+        if self.preload:
+            Reff = (self.dfs * self.robs).sum(dim=0).cpu()
+            Teff = self.dfs.sum(dim=0).clamp(min=1e-6).cpu()
+            return (Reff/Teff).detach().numpy()
+        else:
+            print('Still need to implement avRs without preloading')
+            return None
+    # END MultiDatasset.avrates()
+
     def shift_stim_fixation( self, stim, shift):
         """Simple shift by integer (rounded shift) and zero padded. Note that this is not in 
         is in units of number of bars, rather than -1 to +1. It assumes the stim
