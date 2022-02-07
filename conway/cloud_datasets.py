@@ -34,6 +34,7 @@ class ColorClouds(Dataset):
         include_MUs = False,
         preload = True,
         time_embed = 2,  # 0 is no time embedding, 1 is time_embedding with get_item, 2 is pre-time_embedded
+        folded_lags=True, 
         eyepos = None, 
         device=torch.device('cpu')):
         """Constructor options"""
@@ -41,13 +42,14 @@ class ColorClouds(Dataset):
         self.datadir = datadir
         self.sess_list = sess_list
         self.device = device
-
+        
         self.num_lags = num_lags
         if time_embed == 2:
             assert preload, "Cannot pre-time-embed without preloading."
         self.preload = preload
         self.time_embed = time_embed
         self.stim_crop = stim_crop
+        self.folded_lags = folded_lags
 
         # get hdf5 file handles
         self.fhandles = [h5py.File(os.path.join(datadir, sess + '.hd5'), 'r') for sess in self.sess_list]
@@ -150,9 +152,11 @@ class ColorClouds(Dataset):
             if time_embed == 2:
                 print("Time embedding...")
                 idx = np.arange(runninglength)
-                self.stim = np.transpose(
-                    self.stim[np.arange(runninglength)[:,None]-np.arange(num_lags), :, :, :],
-                    axes=[0,2,3,4,1])
+                tmp_stim = self.stim[np.arange(runninglength)[:,None]-np.arange(num_lags), :, :, :]
+                if self.folded_lags:
+                    self.stim = np.transpose( tmp_stim, axes=[0,2,1,3,4] ) 
+                else:
+                    self.stim = np.transpose( tmp_stim, axes=[0,2,3,4,1] )
 
             # now stimulus is represented as full 4-d + 1 tensor (time, channels, NX, NY, num_lags)
 
@@ -374,7 +378,12 @@ class ColorClouds(Dataset):
         if self.preload:
 
             if self.time_embed == 1:
-                print("get_item time embedding not implemented yet")    
+                print("get_item time embedding not implemented yet")
+                # if self.folded_lags:
+                #    stim = np.transpose( tmp_stim, axes=[0,2,1,3,4] ) 
+                #else:
+                #    stim = np.transpose( tmp_stim, axes=[0,2,3,4,1] )
+    
             else:
                 if len(self.cells_out) == 0:
                     out = {'stim': self.stim[idx, :],

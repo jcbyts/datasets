@@ -40,7 +40,7 @@ class MultiDataset(Dataset):
 
         self.unit_ids = []
         self.includeMUs = includeMUs
-        self.num_units = []
+        self.num_units, self.num_sus, self.num_mus, self.sus = [], [], [], []
         self.dims_file = []
 
         if (device is not None) and (not preload):
@@ -60,11 +60,17 @@ class MultiDataset(Dataset):
         for f, fhandle in enumerate(self.fhandles):
             NTfile = fhandle['robs'].shape[0]
             NCfile = fhandle['robs'].shape[1]
-            
-            self.dims_file.append(fhandle['stim'].shape[1])
-            self.unit_ids.append(self.NC + np.asarray(range(NCfile)))
-            self.num_units.append(NCfile)
+            NMUfile = fhandle['robsMU'].shape[1]
+            self.num_sus.append(NCfile)
+            self.num_mus.append(NMUfile)
+            self.sus = self.sus + list(range(self.NC, self.NC+NCfile))
 
+            self.dims_file.append(fhandle['stim'].shape[1])
+            if includeMUs:
+                NCfile += NMUfile
+            self.unit_ids.append(self.NC + np.asarray(range(NCfile)))
+            
+            self.num_units.append(NCfile)
             self.NTfile.append(NTfile)
 
             # Pull blocks from data_filters
@@ -106,7 +112,7 @@ class MultiDataset(Dataset):
                 NC = fhandle['robs'].shape[1]
                 trange = range(tcount, tcount+NT)
                 crange = range(ccount, ccount+NC)
-
+                
                 # Stimulus
                 if not time_embed:
                     self.stim[trange, :] = np.array(self.fhandles[f]['stim'], dtype='float32')
@@ -125,6 +131,12 @@ class MultiDataset(Dataset):
                 dfs_tmp = np.zeros([NT, self.NC], dtype=np.float32)
                 robs_tmp[:, crange] = np.array(self.fhandles[f]['robs'], dtype='float32')
                 dfs_tmp[:, crange] = np.array(self.fhandles[f]['dfs'], dtype='float32')
+                if includeMUs:
+                    NMU = fhandle['robsMU'].shape[1]
+                    crange = range(ccount+NC, ccount+NC+NMU)
+                    NC += NMU
+                    robs_tmp[:, crange] = np.array(self.fhandles[f]['robsMU'], dtype='float32')
+                    dfs_tmp[:, crange] = np.array(self.fhandles[f]['dfsMU'], dtype='float32')
 
                 self.robs[trange, :] = deepcopy(robs_tmp)
                 self.dfs[trange, :] = deepcopy(dfs_tmp)
@@ -134,6 +146,7 @@ class MultiDataset(Dataset):
             # Convert data to tensor
             self.to_tensor()
 
+        self.sus = np.array(self.sus, dtype=np.int64)
         # Set average rates across dataset (so can be quickly accessed)
         self.avRs = None  # need to set to None so can will pre-calculate
         self.avRs = self.avrates()
