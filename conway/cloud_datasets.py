@@ -52,15 +52,15 @@ class ColorClouds(Dataset):
         self.folded_lags = folded_lags
 
         # get hdf5 file handles
-        self.fhandles = [h5py.File(os.path.join(datadir, sess + '.hd5'), 'r') for sess in self.sess_list]
+        self.fhandles = [h5py.File(os.path.join(datadir, sess + '.mat'), 'r') for sess in self.sess_list]
 
         # build index map
         self.data_threshold = 6  # how many valid time points required to include saccade?
         self.file_index = [] # which file the block corresponds to
         self.sacc_inds = []
         #self.unit_ids = []
-        self.num_units = []
-        self.num_sus = []
+        self.num_units, self.num_sus, self.num_mus = [], [], []
+        self.sus = []
         self.NC = 0       
         #self.stim_dims = None
         self.eyepos = eyepos
@@ -83,11 +83,16 @@ class ColorClouds(Dataset):
         for f, fhandle in enumerate(self.fhandles):
 
             NSUfile = fhandle['Robs'].shape[1]
+            NMUfile = fhandle['RobsMU'].shape[1]
+            self.num_sus.append(NSUfile)
+            self.num_mus.append(NMUfile)
+            self.sus = self.sus + list(range(self.NC, self.NC+NSUfile))
+
             NCfile = NSUfile
             if self.include_MUs:
-                NCfile += fhandle['RobsMU'].shape[1]
+                NCfile += NMUfile
 
-            Nsac_file = fhandle['sac_inds'].shape[0]
+            Nsac_file = fhandle['sacc_inds'].shape[0]
 
             #if self.stim_dims is None:
             self.dims = [fhandle['stim'].shape[3]] + list(fhandle['stim'].shape[1:3]) + [1]
@@ -100,10 +105,9 @@ class ColorClouds(Dataset):
 
             #self.unit_ids.append(self.NC + np.asarray(range(NCfile)))
             self.num_units.append(NCfile)
-            self.num_sus.append(NSUfile)
             self.NC += NCfile
 
-            sac_inds = fhandle['sac_inds']
+            sac_inds = np.array(fhandle['sacc_inds'], dtype=np.int64)
             NStmp = sac_inds.shape[0]
             NT = fhandle['Robs'].shape[0]
 
@@ -129,6 +133,7 @@ class ColorClouds(Dataset):
         self.sacc_ts = np.zeros([self.NT, 1], dtype=np.float32)
         self.fix_n = np.zeros(self.NT, dtype=np.int64)  # label of which fixation is in each range
         for nn in range(self.num_fixations):
+            print(nn, self.sacc_inds[nn][0], self.sacc_inds[nn][1] )
             self.sacc_ts[self.sacc_inds[nn][0]] = 1 
             self.fix_n[range(self.sacc_inds[nn][0], self.sacc_inds[nn][1])] = nn
         #self.fix_n = list(self.fix_n)  # better list than numpy
@@ -436,3 +441,6 @@ class ColorClouds(Dataset):
 
     def __len__(self):
         return len(self.valid_inds)
+
+
+    
