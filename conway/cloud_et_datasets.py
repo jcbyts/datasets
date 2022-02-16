@@ -35,6 +35,7 @@ class ColorClouds(Dataset):
         stim_crop = None,
         time_embed = 2,  # 0 is no time embedding, 1 is time_embedding with get_item, 2 is pre-time_embedded
         folded_lags=True, 
+        luminance_only=True,
         maxT = None,
         # other
         ignore_saccades = True,
@@ -120,14 +121,16 @@ class ColorClouds(Dataset):
             else:
                 self.dims = [fhandle[stimname].shape[3]] + list(fhandle[stimname].shape[1:3]) + [1]
             
-            print('Stim check:', stimname, folded_lags, self.dims)
-            
-            #else:
-                #check = self.stim_dims = fhandle['stim'].shape[1:]
-            #    print('check dims: not implemented currently. Use data default. Ignoring stim_dims argument.')
+            self.luminance_only = luminance_only
+            if luminance_only:
+                if self.dims[0] > 1:
+                    print("Reducing stimulus channels (%d) to first dimension"%self.dims[0])
+                self.dims[0] = 1
             
             if self.time_embed > 0:
                 self.dims[3] = self.num_lags
+
+            print('Stim check:', stimname, folded_lags, self.dims)
 
             #self.unit_ids.append(self.NC + np.asarray(range(NCfile)))
             self.num_units.append(NCfile)
@@ -198,7 +201,7 @@ class ColorClouds(Dataset):
         if preload:
             print("Loading data into memory...")
             self.preload_numpy()
-
+            print('Stim shape', self.stim.shape)
             # Note stim is being represented as full 3-d + 1 tensor (time, channels, NX, NY)
             if self.eyepos is not None:
                 # Would want to shift by input eye positions if input here
@@ -211,8 +214,8 @@ class ColorClouds(Dataset):
                 idx = np.arange(self.NT)
                 tmp_stim = self.stim[np.arange(self.NT)[:,None]-np.arange(num_lags), :, :, :]
                 if self.folded_lags:
-                    print('Folded lags')
                     self.stim = np.transpose( tmp_stim, axes=[0,2,1,3,4] ) 
+                    print("Folded lags: stim-dim = ", self.stim.shape)
                 else:
                     self.stim = np.transpose( tmp_stim, axes=[0,2,3,4,1] )
 
@@ -265,8 +268,10 @@ class ColorClouds(Dataset):
             inds = range(t_counter, t_counter+sz[0])
             #inds = self.stim_indices[expt][stim]['inds']
             #self.stim[inds, ...] = np.transpose( np.array(fhandle[self.stimname], dtype=np.float32), axes=[0,3,1,2])
-            self.stim[inds, ...] = np.array(fhandle[self.stimname], dtype=np.float32)
-            #self.frame_times[inds] = fhandle[stim][self.stimset]['frameTimesOe'][...].T
+            if self.luminance_only:
+                self.stim[inds, 0, ...] = np.array(fhandle[self.stimname][:, 0, ...], dtype=np.float32)
+            else:
+                self.stim[inds, ...] = np.array(fhandle[self.stimname], dtype=np.float32)
 
             """ EYE POSITION """
             #ppd = fhandle[stim][self.stimset]['Stim'].attrs['ppd'][0]
