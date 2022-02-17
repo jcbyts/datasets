@@ -67,7 +67,7 @@ class ColorClouds(Dataset):
         #self.unit_ids = []
         self.num_units, self.num_sus, self.num_mus = [], [], []
         self.sus = []
-        self.NC = 0       
+        self.NC = 0    
         #self.stim_dims = None
         self.eyepos = eyepos
         self.generate_Xfix = False
@@ -78,6 +78,7 @@ class ColorClouds(Dataset):
         self.SUinds = []
         self.MUinds = []
         self.cells_out = []  # can be list to output specific cells in get_item
+        self.avRs = None
 
         # Set up to store default train_, val_, test_inds
         self.test_inds = None
@@ -116,10 +117,10 @@ class ColorClouds(Dataset):
             self.num_blks[fnum]= blk_inds.shape[0]
 
             #if self.stim_dims is None:
-            if folded_lags:
-                self.dims = list(fhandle[stimname].shape[1:4]) + [1]
-            else:
-                self.dims = [fhandle[stimname].shape[3]] + list(fhandle[stimname].shape[1:3]) + [1]
+            #if folded_lags:
+            self.dims = list(fhandle[stimname].shape[1:4]) + [1]
+            #else:
+            #    self.dims = list(fhandle[stimname].shape[1:4]) + [1]
             
             self.luminance_only = luminance_only
             if luminance_only:
@@ -224,6 +225,10 @@ class ColorClouds(Dataset):
             # Flatten stim 
             self.stim = np.reshape(self.stim, [self.NT, -1])
 
+            # Have data_filters represend used_inds (in case it gets through)
+            unified_df = np.zeros([self.NT, 1], dtype=np.float32)
+            unified_df[self.used_inds] = 1.0
+            self.dfs *= unified_df
             # Convert data to tensors
             #if self.device is not None:
             self.to_tensor(self.device)
@@ -234,7 +239,7 @@ class ColorClouds(Dataset):
         # Develop default train, validation, and test datasets 
         #self.crossval_setup()
 
-        ## NEED TO FIX SO REFLECTS BLOCK STRUCTURE
+        # Reflects block structure
         vblks, trblks = self.fold_sample(len(self.block_inds), 5, random_gen=True)
         self.train_inds = []
         for nn in trblks:
@@ -301,17 +306,50 @@ class ColorClouds(Dataset):
             t_counter += sz[0]
             unit_counter += self.num_units[ee]
 
+        # once stim loaded from disk, make sure stim is named regular
+        self.stimname = 'stim'
     # END .preload_numpy()
 
     def to_tensor(self, device):
-        self.stim = torch.tensor(self.stim, dtype=torch.float32, device=device)
-        self.robs = torch.tensor(self.robs, dtype=torch.float32, device=device)
-        self.dfs = torch.tensor(self.dfs, dtype=torch.float32, device=device)
-        self.fix_n = torch.tensor(self.fix_n, dtype=torch.int64, device=device)
+        if isinstance(self.stim, torch.Tensor):
+            # then already converted: just moving device
+            self.stim = self.stim.to(device)
+            self.robs = self.robs.to(device)
+            self.dfs = self.dfs.to(device)
+            self.fix_n = self.fix_n.to(device)
+        else:
+            self.stim = torch.tensor(self.stim, dtype=torch.float32, device=device)
+            self.robs = torch.tensor(self.robs, dtype=torch.float32, device=device)
+            self.dfs = torch.tensor(self.dfs, dtype=torch.float32, device=device)
+            self.fix_n = torch.tensor(self.fix_n, dtype=torch.int64, device=device)
 
     #    self.sacc_ts = torch.tensor(self.sacc_ts, dtype=torch.float32, device=device)
         #self.eyepos = torch.tensor(self.eyepos.astype('float32'), dtype=self.dtype, device=device)
         #self.frame_times = torch.tensor(self.frame_times.astype('float32'), dtype=self.dtype, device=device)
+
+    def avrates( self, inds=None ):
+        """
+        Calculates average firing probability across specified inds (or whole dataset)
+        -- Note will respect datafilters
+        -- will return precalc value to save time if already stored
+        """
+        if inds is None:
+            inds = range(self.NT)
+        if len(inds) == self.NT:
+            # then calculate across whole dataset
+            if self.avRs is not None:
+                # then precalculated and do not need to do
+                return self.avRs
+
+        # Otherwise calculate across all data
+        if self.preload:
+            Reff = (self.dfs * self.robs).sum(dim=0).cpu()
+            Teff = self.dfs.sum(dim=0).clamp(min=1e-6).cpu()
+            return (Reff/Teff).detach().numpy()
+        else:
+            print('Still need to implement avRs without preloading')
+            return None
+    # END .avrates()
 
     def shift_stim_fixation( self, stim, shift):
         """Simple shift by integer (rounded shift) and zero padded. Note that this is not in 
@@ -328,7 +366,7 @@ class ColorClouds(Dataset):
             shstim = deepcopy(stim)
 
         return shstim
-    # END MultiDatasetFix.shift_stim_fixation
+    # END .shift_stim_fixation
 
     def create_valid_indices(self, post_sacc_gap=None):
         """
