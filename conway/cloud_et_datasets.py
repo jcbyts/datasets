@@ -29,12 +29,18 @@ class ColorClouds(Dataset):
     def __init__(self,
         sess_list,
         datadir, 
-        num_lags=10,
+        # Stim setuup
+        num_lags=10, 
+        which_stim = None,
         stim_crop = None,
-        include_MUs = False,
-        preload = True,
         time_embed = 2,  # 0 is no time embedding, 1 is time_embedding with get_item, 2 is pre-time_embedded
         folded_lags=True, 
+        luminance_only=True,
+        maxT = None,
+        # other
+        ignore_saccades = True,
+        include_MUs = False,
+        preload = True,
         eyepos = None, 
         device=torch.device('cpu')):
         """Constructor options"""
@@ -46,8 +52,8 @@ class ColorClouds(Dataset):
         self.num_lags = num_lags
         if time_embed == 2:
             assert preload, "Cannot pre-time-embed without preloading."
-        self.preload = preload
         self.time_embed = time_embed
+        self.preload = preload
         self.stim_crop = stim_crop
         self.folded_lags = folded_lags
 
@@ -61,81 +67,131 @@ class ColorClouds(Dataset):
         #self.unit_ids = []
         self.num_units, self.num_sus, self.num_mus = [], [], []
         self.sus = []
-        self.NC = 0       
+        self.NC = 0    
         #self.stim_dims = None
         self.eyepos = eyepos
         self.generate_Xfix = False
-        self.fixation_grouping = []
+        self.num_blks = np.zeros(len(sess_list), dtype=int)
+        self.block_inds = []
+        self.block_filemapping = []
         self.include_MUs = include_MUs
         self.SUinds = []
         self.MUinds = []
-        
         self.cells_out = []  # can be list to output specific cells in get_item
+        self.avRs = None
 
         # Set up to store default train_, val_, test_inds
         self.test_inds = None
         self.val_inds = None
         self.train_inds = None
 
-        self.num_fixations = 0
-        runninglength = 0
+        # Data to construct and store in memory
+        self.fix_n = []
+        self.sacc_on = []
+        self.sacc_off = []
+        self.used_inds = []
 
-        for f, fhandle in enumerate(self.fhandles):
+        tcount, fix_count = 0, 0
 
-            NSUfile = fhandle['Robs'].shape[1]
+        if which_stim is None:
+            stimname = 'stim'
+        else:
+            stimname = which_stim
+        self.stimname = stimname
+
+        for fnum, fhandle in enumerate(self.fhandles):
+
+            NT, NSUfile = fhandle['Robs'].shape
             NMUfile = fhandle['RobsMU'].shape[1]
             self.num_sus.append(NSUfile)
             self.num_mus.append(NMUfile)
             self.sus = self.sus + list(range(self.NC, self.NC+NSUfile))
+            blk_inds = np.array(fhandle['block_inds'], dtype=np.int64).T
 
             NCfile = NSUfile
             if self.include_MUs:
                 NCfile += NMUfile
-
-            Nsac_file = fhandle['sacc_inds'].shape[0]
+            
+            # This will associate each block with each file
+            self.block_filemapping += list(np.ones(blk_inds.shape[0], dtype=int)*fnum)
+            self.num_blks[fnum]= blk_inds.shape[0]
 
             #if self.stim_dims is None:
-            self.dims = [fhandle['stim'].shape[3]] + list(fhandle['stim'].shape[1:3]) + [1]
+            #if folded_lags:
+            self.dims = list(fhandle[stimname].shape[1:4]) + [1]
             #else:
-                #check = self.stim_dims = fhandle['stim'].shape[1:]
-            #    print('check dims: not implemented currently. Use data default. Ignoring stim_dims argument.')
+            #    self.dims = list(fhandle[stimname].shape[1:4]) + [1]
+            
+            self.luminance_only = luminance_only
+            if luminance_only:
+                if self.dims[0] > 1:
+                    print("Reducing stimulus channels (%d) to first dimension"%self.dims[0])
+                self.dims[0] = 1
             
             if self.time_embed > 0:
                 self.dims[3] = self.num_lags
+
+            print('Stim check:', stimname, folded_lags, self.dims)
 
             #self.unit_ids.append(self.NC + np.asarray(range(NCfile)))
             self.num_units.append(NCfile)
             self.NC += NCfile
 
-            sac_inds = np.array(fhandle['sacc_inds'], dtype=np.int64)
-            NStmp = sac_inds.shape[0]
-            NT = fhandle['Robs'].shape[0]
+            sacc_inds = np.array(fhandle['sacc_inds'], dtype=np.int64)
+            fix_n = np.zeros(NT, dtype=np.int64)  # each time point labels fixation number
+            sacc_on = np.zeros(NT, dtype=np.float32)  # each time point labels fixation number
+            sacc_on[sacc_inds[:,0]-1] = 1.0
+            sacc_off = np.zeros(NT, dtype=np.float32)  # each time point labels fixation number
+            sacc_off[sacc_inds[:,1]-1] = 1.0
 
-            # Make saccade ranges for each saccade
-            self.sacc_inds = []
-            for b in range(NStmp):
-                self.file_index.append(f)
-                if b < NStmp-1:
-                    self.sacc_inds.append( [sac_inds[b]-1+runninglength, sac_inds[b+1]+runninglength] )
-                else:
-                    self.sacc_inds.append( [sac_inds[b]-1+runninglength, runninglength+NT] )
+            valid_inds = np.array(fhandle['valid_data'], dtype=np.int64)[0,:]-1  #range(self.NT)  # default -- to be changed at end of init
+
+            # Got through each block to segment into fixations
+            for nn in range(blk_inds.shape[0]):
+                # note this will be the inds in each file -- file offset must be added for mult files
+                self.block_inds.append(np.arange( blk_inds[nn,0]-1, blk_inds[nn,1], dtype=int))
+                t0 = blk_inds[nn, 0]-1
+                #valid_inds[range(t0, t0+num_lags)] = 0  # this already adjusted for?
+
+                # Parse fixation numbers within block
+                if not ignore_saccades:
+                    rel_saccs = np.where((sacc_inds[:,0] > t0) & (sacc_inds[:,0] < blk_inds[nn,1]))[0]
+                    for mm in range(len(rel_saccs)):
+                        fix_count += 1
+                        fix_n[ range(t0, sacc_inds[rel_saccs[mm], 0]) ] = fix_count
+                        t0 = sacc_inds[rel_saccs[mm], 1]-1
+                # Put in last (or only) fixation number
+                if t0 < blk_inds[nn, 1]:
+                    fix_count += 1
+                    fix_n[ range(t0, blk_inds[nn, 1]) ] = fix_count
             
+            tcount += NT
+            # make larger fix_n, valid_inds, sacc_inds, block_inds as self
 
-            self.fixation_grouping.append(list(np.arange(NStmp, dtype='int64')+self.num_fixations))
-            self.num_fixations += NStmp
-            runninglength += NT
+        self.NT  = tcount
+        if maxT is not None:
+            print("Would be shortening dataset from %d to %d."%(self.NT, maxT))
+            #self.NT = maxT
+            print('But this is a bad idea -- wont do for now')
+            # will need to parse out block inds and valid_data
 
-        self.NT  = runninglength
-        #self.valid_inds = range(self.NT)  # default -- to be changed at end of init
-
+        # For now let's just debug with one file
+        if len(sess_list) > 1:
+            print('Warning: currently ignoring multiple files')
+        self.used_inds = deepcopy(valid_inds)
+        self.fix_n = deepcopy(fix_n)
+        self.sac_on = deepcopy(sacc_on)
+        self.sac_off = deepcopy(sacc_off)
+        self.sacc_inds = deepcopy(sacc_inds)
+        
         # Go through saccades to establish val_indices and produce saccade timing vector 
         # Note that sacc_ts will be generated even without preload -- small enough that doesnt matter
-        self.sacc_ts = np.zeros([self.NT, 1], dtype=np.float32)
-        self.fix_n = np.zeros(self.NT, dtype=np.int64)  # label of which fixation is in each range
-        for nn in range(self.num_fixations):
-            print(nn, self.sacc_inds[nn][0], self.sacc_inds[nn][1] )
-            self.sacc_ts[self.sacc_inds[nn][0]] = 1 
-            self.fix_n[range(self.sacc_inds[nn][0], self.sacc_inds[nn][1])] = nn
+    #    self.sacc_ts = np.zeros([self.NT, 1], dtype=np.float32)
+    #    self.fix_n = np.zeros(self.NT, dtype=np.int64)  # label of which fixation is in each range
+    #    for nn in range(self.num_fixations):
+    #        print(nn, self.sacc_inds[nn][0], self.sacc_inds[nn][1] )
+    #        self.sacc_ts[self.sacc_inds[nn][0]] = 1 
+    #        self.fix_n[range(self.sacc_inds[nn][0], self.sacc_inds[nn][1])] = nn
         #self.fix_n = list(self.fix_n)  # better list than numpy
 
         #self.dims = np.unique(np.asarray(self.dims)) # assumes they're all the same    
@@ -146,7 +202,7 @@ class ColorClouds(Dataset):
         if preload:
             print("Loading data into memory...")
             self.preload_numpy()
-
+            print('Stim shape', self.stim.shape)
             # Note stim is being represented as full 3-d + 1 tensor (time, channels, NX, NY)
             if self.eyepos is not None:
                 # Would want to shift by input eye positions if input here
@@ -156,10 +212,11 @@ class ColorClouds(Dataset):
 
             if time_embed == 2:
                 print("Time embedding...")
-                idx = np.arange(runninglength)
-                tmp_stim = self.stim[np.arange(runninglength)[:,None]-np.arange(num_lags), :, :, :]
+                idx = np.arange(self.NT)
+                tmp_stim = self.stim[np.arange(self.NT)[:,None]-np.arange(num_lags), :, :, :]
                 if self.folded_lags:
                     self.stim = np.transpose( tmp_stim, axes=[0,2,1,3,4] ) 
+                    print("Folded lags: stim-dim = ", self.stim.shape)
                 else:
                     self.stim = np.transpose( tmp_stim, axes=[0,2,3,4,1] )
 
@@ -168,16 +225,30 @@ class ColorClouds(Dataset):
             # Flatten stim 
             self.stim = np.reshape(self.stim, [self.NT, -1])
 
+            # Have data_filters represend used_inds (in case it gets through)
+            unified_df = np.zeros([self.NT, 1], dtype=np.float32)
+            unified_df[self.used_inds] = 1.0
+            self.dfs *= unified_df
             # Convert data to tensors
             #if self.device is not None:
             self.to_tensor(self.device)
             print("Done.")
 
         # Create valid indices and first pass of cross-validation indices
-        self.create_valid_indices()
+        #self.create_valid_indices()
         # Develop default train, validation, and test datasets 
-        self.crossval_setup() 
+        #self.crossval_setup()
 
+        # Reflects block structure
+        vblks, trblks = self.fold_sample(len(self.block_inds), 5, random_gen=True)
+        self.train_inds = []
+        for nn in trblks:
+            self.train_inds += list(deepcopy(self.block_inds[nn]))
+        self.val_inds = []
+        for nn in vblks:
+            self.val_inds += list(deepcopy(self.block_inds[nn]))
+        self.train_inds = np.array(self.train_inds, dtype=np.int64)
+        self.val_inds = np.array(self.val_inds, dtype=np.int64)
     # END ColorClouds.__init__
 
     def preload_numpy(self):
@@ -198,11 +269,14 @@ class ColorClouds(Dataset):
         for ee in range(len(self.fhandles)):
             
             fhandle = self.fhandles[ee]
-            sz = fhandle['stim'].shape
+            sz = fhandle[self.stimname].shape
             inds = range(t_counter, t_counter+sz[0])
             #inds = self.stim_indices[expt][stim]['inds']
-            self.stim[inds, ...] = np.transpose( np.array(fhandle['stim'], dtype=np.float32), axes=[0,3,1,2])
-            #self.frame_times[inds] = fhandle[stim][self.stimset]['frameTimesOe'][...].T
+            #self.stim[inds, ...] = np.transpose( np.array(fhandle[self.stimname], dtype=np.float32), axes=[0,3,1,2])
+            if self.luminance_only:
+                self.stim[inds, 0, ...] = np.array(fhandle[self.stimname][:, 0, ...], dtype=np.float32)
+            else:
+                self.stim[inds, ...] = np.array(fhandle[self.stimname], dtype=np.float32)
 
             """ EYE POSITION """
             #ppd = fhandle[stim][self.stimset]['Stim'].attrs['ppd'][0]
@@ -219,7 +293,7 @@ class ColorClouds(Dataset):
             num_sus = fhandle['Robs'].shape[1]
             units = range(unit_counter, unit_counter+num_sus)
             robs_tmp[:, units] = np.array(fhandle['Robs'], dtype=np.float32)
-            dfs_tmp[:, units] = np.array(fhandle['DFs'], dtype=np.float32)
+            dfs_tmp[:, units] = np.array(fhandle['datafilts'], dtype=np.float32)
             if self.include_MUs:
                 num_mus = fhandle['RobsMU'].shape[1]
                 units = range(unit_counter+num_sus, unit_counter+num_sus+num_mus)
@@ -232,15 +306,50 @@ class ColorClouds(Dataset):
             t_counter += sz[0]
             unit_counter += self.num_units[ee]
 
+        # once stim loaded from disk, make sure stim is named regular
+        self.stimname = 'stim'
     # END .preload_numpy()
 
     def to_tensor(self, device):
-        self.stim = torch.tensor(self.stim, dtype=torch.float32, device=device)
-        self.robs = torch.tensor(self.robs, dtype=torch.float32, device=device)
-        self.dfs = torch.tensor(self.dfs, dtype=torch.float32, device=device)
-        self.sacc_ts = torch.tensor(self.sacc_ts, dtype=torch.float32, device=device)
+        if isinstance(self.stim, torch.Tensor):
+            # then already converted: just moving device
+            self.stim = self.stim.to(device)
+            self.robs = self.robs.to(device)
+            self.dfs = self.dfs.to(device)
+            self.fix_n = self.fix_n.to(device)
+        else:
+            self.stim = torch.tensor(self.stim, dtype=torch.float32, device=device)
+            self.robs = torch.tensor(self.robs, dtype=torch.float32, device=device)
+            self.dfs = torch.tensor(self.dfs, dtype=torch.float32, device=device)
+            self.fix_n = torch.tensor(self.fix_n, dtype=torch.int64, device=device)
+
+    #    self.sacc_ts = torch.tensor(self.sacc_ts, dtype=torch.float32, device=device)
         #self.eyepos = torch.tensor(self.eyepos.astype('float32'), dtype=self.dtype, device=device)
         #self.frame_times = torch.tensor(self.frame_times.astype('float32'), dtype=self.dtype, device=device)
+
+    def avrates( self, inds=None ):
+        """
+        Calculates average firing probability across specified inds (or whole dataset)
+        -- Note will respect datafilters
+        -- will return precalc value to save time if already stored
+        """
+        if inds is None:
+            inds = range(self.NT)
+        if len(inds) == self.NT:
+            # then calculate across whole dataset
+            if self.avRs is not None:
+                # then precalculated and do not need to do
+                return self.avRs
+
+        # Otherwise calculate across all data
+        if self.preload:
+            Reff = (self.dfs * self.robs).sum(dim=0).cpu()
+            Teff = self.dfs.sum(dim=0).clamp(min=1e-6).cpu()
+            return (Reff/Teff).detach().numpy()
+        else:
+            print('Still need to implement avRs without preloading')
+            return None
+    # END .avrates()
 
     def shift_stim_fixation( self, stim, shift):
         """Simple shift by integer (rounded shift) and zero padded. Note that this is not in 
@@ -257,7 +366,7 @@ class ColorClouds(Dataset):
             shstim = deepcopy(stim)
 
         return shstim
-    # END MultiDatasetFix.shift_stim_fixation
+    # END .shift_stim_fixation
 
     def create_valid_indices(self, post_sacc_gap=None):
         """
@@ -273,7 +382,8 @@ class ColorClouds(Dataset):
         
         # Now invalid post_sacc_gap following saccades
         for nn in range(self.num_fixations):
-            sts = self.sacc_inds[nn]
+            print(self.sacc_inds[nn, :])
+            sts = self.sacc_inds[nn, :]
             is_valid[range(sts[0], np.minimum(sts[0]+post_sacc_gap, self.NT))] = 0
         
         #self.valid_inds = list(np.where(is_valid > 0)[0])
@@ -368,7 +478,7 @@ class ColorClouds(Dataset):
         free = t - (a+r)
 
         data = self[0]
-        mempersample = data['stim'].element_size() * data['stim'].nelement() + 2*data['robs'].element_size() * data['robs'].nelement()
+        mempersample = data[self.stimname].element_size() * data[self.stimname].nelement() + 2*data['robs'].element_size() * data['robs'].nelement()
     
         mempercell = mempersample * (nquad+1) * (history_size + 1)
         buffer_bytes = buffer*1024**3
@@ -417,7 +527,7 @@ class ColorClouds(Dataset):
             f = 0
             #f = self.file_index[inds]  # problem is this could span across several files
 
-            stim = torch.tensor(self.fhandles[f]['stim'][inds,:], dtype=torch.float32)
+            stim = torch.tensor(self.fhandles[f][stimname][inds,:], dtype=torch.float32)
             # reshape and flatten stim: currently its NT x NX x NY x Nclrs
             stim = stim.permute([0,3,1,2]).reshape([-1, num_dims])
                 
@@ -440,7 +550,4 @@ class ColorClouds(Dataset):
         return out                
 
     def __len__(self):
-        return len(self.valid_inds)
-
-
-    
+        return len(self.used_inds)
