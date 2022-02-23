@@ -31,13 +31,14 @@ class Pixel(Dataset):
         download=False,
         covariate_requests={}, # fixation_num, fixation_onset
         device=torch.device('cpu'),
+        spike_sorting='kilowf'
     ):
     
         super().__init__()
 
         self.stimset = stimset
         self.requested_stims = requested_stims
-        self.spike_sorting = 'kilowf' # only one option for now
+        self.spike_sorting = spike_sorting
         self.downsample_t = downsample_t
         self.num_lags = num_lags
 
@@ -160,7 +161,7 @@ class Pixel(Dataset):
             # nfix = len(fix_start)
 
             ctrs = covariate_requests['fixation_onset']['tent_ctrs']
-            step = np.mean(np.diff(ctrs)/2)
+            step = np.mean(np.diff(ctrs))
             nlags = len(ctrs)
 
             sacstim = np.zeros((self.covariates['stim'].shape[-1], 1))
@@ -441,7 +442,8 @@ class Pixel(Dataset):
                     self.stim_indices[sess][stim]['fix_stop'][ii])
                     if index_valid:
                         fix_inds = np.where(np.in1d(self.valid_idx, fix_inds))[0]
-                    fixations.append(fix_inds)
+                    if len(fix_inds)>0:    
+                        fixations.append(fix_inds)
         
         return fixations
     
@@ -560,7 +562,7 @@ class Pixel(Dataset):
                 s = s/self.downsample_t
             else:
                 s = self.covariates['stim'][..., self.valid_idx[idx,None]-range(self.num_lags)]/self.normalizing_constant
-                
+
         else: # crop stimulus on load
             if self.downsample_t > 1:
                 s = 0
