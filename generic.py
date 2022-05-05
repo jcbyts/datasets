@@ -24,7 +24,7 @@ class GenericDataset(Dataset):
         
         self.device = device
 
-        if len(self.covariates['stim'].shape) > 3:
+        if 'stim' in self.covariates.keys() and len(self.covariates['stim'].shape) > 3:
             self.covariates['stim'] = self.covariates['stim'].contiguous(memory_format=torch.channels_last)
 
         self.cov_list = list(self.covariates.keys())
