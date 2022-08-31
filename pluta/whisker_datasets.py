@@ -11,7 +11,7 @@ from copy import deepcopy
 import h5py
 
 
-class WhiskerData(Dataset):
+class WhiskerData(SensoryBase):
     """
     -- can load batches from multiple datasets IN principle, but many variables not set up to do so
     -- hdf5 files must have the following information:
