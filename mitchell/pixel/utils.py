@@ -23,7 +23,13 @@ def get_stim_list(id=None, verbose=False):
             '20191206': 'logan_20191206_-20_-10_50_60_0_19_0_1.hdf5',
             '20191231': 'logan_20191231_-20_-10_50_60_0_19_0_1.hdf5',
             '20200304': 'logan_20200304_-20_-10_50_60_0_19_0_1.hdf5',
-            '20220216': 'allen_20220216_-60_-50_10_20_0_19_0_1.hdf5'
+            '20220216': 'allen_20220216_-60_-50_10_20_0_19_0_1.hdf5',
+            '20220601': 'allen_20220601_-80_-50_10_50_1_0_1_19_0_1.hdf5',
+            '20220601fix': 'allen_20220601_-80_-50_10_50_0_0_0_19_0_1.hdf5',
+            '20220601fixc': 'allen_20220601_-80_-50_10_50_1_0_0_19_0_1.hdf5',
+            '20220610': 'allen_20220610_-80_-50_10_50_1_0_1_19_0_1.hdf5',
+            '20220610fix': 'allen_20220610_-80_-50_10_50_0_0_0_19_0_1.hdf5',
+            '20220610fixc': 'allen_20220610_-80_-50_10_50_1_0_0_19_0_1.hdf5',
         }
 
     if id is None:
@@ -42,6 +48,7 @@ def get_stim_url(id):
             '20191119': 'https://www.dropbox.com/s/xxaat202j20kriy/logan_20191119_-20_-10_50_60_0_19_0_1.hdf5?dl=1',
             '20191231':'https://www.dropbox.com/s/ulpcjfb48c6dyyf/logan_20191231_-20_-10_50_60_0_19_0_1.hdf5?dl=1',
             '20200304': 'https://www.dropbox.com/s/5tj5m2rp0wht8z2/logan_20200304_-20_-10_50_60_0_19_0_1.hdf5?dl=1',
+            '20220601': 'https://www.dropbox.com/s/v85m0b9kzwiowqm/allen_20220601_-80_-50_10_50_1_0_19_0_1.hdf5?dl=1'
         }
     
     if id not in urlpath.keys():
@@ -91,7 +98,7 @@ def download_shifter(sessname, fpath):
     print("Done")
 
 
-def shift_im(im, shift):
+def shift_im(im, shift, mode='nearest', upsample=1):
         """
         apply shifter to translate stimulus as a function of the eye position
         im = N x C x H x W (torch.float32)
@@ -113,7 +120,11 @@ def shift_im(im, shift):
         n = im.shape[0]
         grid = F.affine_grid(affine_trans, torch.Size((n, 1, sz[2], sz[3])), align_corners=False)
 
-        im2 = F.grid_sample(im, grid, align_corners=False)
+        if upsample > 1:
+            upsamp = torch.nn.UpsamplingNearest2d(scale_factor=upsample)
+            im = upsamp(im)
+
+        im2 = F.grid_sample(im, grid, align_corners=False, mode=mode)
 
         return im2.detach()
 

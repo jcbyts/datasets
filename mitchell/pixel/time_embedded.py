@@ -27,8 +27,10 @@ class Pixel(Dataset):
         fixations_only:bool=False,
         valid_eye_rad:float=5.2,
         downsample_t:int=1,
+        ctr=np.zeros(2),
         verbose=False,
         download=False,
+        embed_eyepos=False,
         covariate_requests={}, # fixation_num, fixation_onset
         device=torch.device('cpu'),
         spike_sorting='kilowf'
@@ -41,8 +43,9 @@ class Pixel(Dataset):
         self.spike_sorting = spike_sorting
         self.downsample_t = downsample_t
         self.num_lags = num_lags
-
+        self.ctr = ctr
         self.fixations_only = fixations_only
+        self.embed_eyepos = embed_eyepos
         if self.fixations_only:
             self.pad_fix_start = self.num_lags # pad by the number of stimulus lags
 
@@ -199,7 +202,7 @@ class Pixel(Dataset):
             step = np.mean(np.diff(ctrs)/2)
             nlags = len(ctrs)
 
-            self.covariates['frame_tent'] = np.zeros((self.covariates['stim'].shape[-1], nlags))
+            self.covariates['frame_tent'] = np.zeros((len(self.covariates['frame_times']), nlags))
             
             x = np.abs(self.covariates['frame_times'] - ctrs)
             x = np.maximum(0, ( 1-x/step ))
@@ -218,7 +221,8 @@ class Pixel(Dataset):
             self.correct_stim(shifters)
         
         self.shift = None
-        self.raw_dims = self.dims
+        from copy import deepcopy
+        self.raw_dims = deepcopy(self.dims)
 
         self._crop_idx = [0, self.dims[1], 0, self.dims[2]]
 
@@ -363,9 +367,15 @@ class Pixel(Dataset):
 
         return shifters
 
-    def correct_stim(self, shifters, verbose=True):
+    def correct_stim(self, shifters, verbose=True, enforce_fixations=True):
         if verbose:
             print("Correcting stim...")
+            if enforce_fixations:
+                print("enforcing fixations")
+        
+        if enforce_fixations:
+            fix_inds = self.get_fixation_indices()
+            num_fix = len(fix_inds)
 
         
         for sess in shifters.keys():
@@ -379,7 +389,21 @@ class Pixel(Dataset):
                     inds = self.stim_indices[sess][stim]['inds']
 
                     shift = shifters[sess](self.covariates['eyepos'][inds,:])
-                    self.covariates['stim'][...,inds] = shift_im(self.covariates['stim'][...,inds].permute(3,0,1,2), shift).permute(1,2,3,0)
+                    if enforce_fixations:
+                        for ifix in range(num_fix):
+                            ii = np.where(np.in1d(inds, fix_inds[ifix]))[0]
+                            if len(ii)>0:
+                                shift[ii,:] = shift[ii,:].mean(dim=0)
+
+                    # ninds = len(inds)
+                    # batch_size = 5000
+                    # nbatch = ninds//batch_size + 1
+                    # for ibatch in range(nbatch):
+                    #     ii = np.arange(batch_size)+batch_size*ibatch
+                    #     if ibatch==(nbatch-1):
+                    #         ii = ii[ii < ninds]
+                    #         self.covariates['stim'][...,inds[ii]] = shift_im(self.covariates['stim'][...,inds[ii]].permute(3,0,1,2), shift[ii,:], mode='bicubic', upsample=4).permute(1,2,3,0)
+                    self.covariates['stim'][...,inds] = shift_im(self.covariates['stim'][...,inds].permute(3,0,1,2), shift, mode='bilinear', upsample=2).permute(1,2,3,0)
                     self.stim_indices[sess][stim]['corrected'] = True
         
         if verbose:
@@ -427,7 +451,7 @@ class Pixel(Dataset):
             xy[:,1] = centerpix[1] - xy[:,1] # y pixels run down (flip when converting to degrees)
             # convert to degrees
             xy = xy/ppd
-
+            xy = xy - self.ctr
             eyeCentered = np.hypot(xy[:,0],xy[:,1]) < self.valid_eye_rad
             valid = np.intersect1d(valid, np.where(eyeCentered)[0])
 
@@ -445,6 +469,21 @@ class Pixel(Dataset):
                     if len(fix_inds)>0:    
                         fixations.append(fix_inds)
         
+        num_fix = len(fixations)
+        v = np.zeros(num_fix)
+        for i in range(num_fix):
+            if isinstance(fixations[i], np.int64) or len(fixations[i]) < 10:
+                continue
+            else:
+                if isinstance(self.covariates['eyepos'], torch.Tensor):
+                    v[i] = torch.hypot(self.covariates['eyepos'][fixations[i][5:],0], self.covariates['eyepos'][fixations[i][5:],1]).var().item()
+                else:
+                    v[i] = np.var(np.hypot(self.covariates['eyepos'][fixations[i][5:],0], self.covariates['eyepos'][fixations[i][5:],1]))
+
+        v[np.isnan(v)] = 100
+
+        fixations = [fixations[f] for f in np.where(v < .1)[0]]
+
         return fixations
     
     def get_train_indices(self, seed=1234, frac_train=0.8):
@@ -495,9 +534,45 @@ class Pixel(Dataset):
 
         return stas
 
-    def compute_datafilters(self, batch_size=1000, sd_thresh=2):
+    def get_crop_window(self, win_size=35,
+        inds=None, cids=None, plot=True):
+        ''' 
+        calculate STAS on the squared pixels and use that to find a cropping window
+        '''
+
+
+        self.crop_idx = [0, self.raw_dims[1], 0, self.raw_dims[2]] # set original crop index
+
+        if cids is None:
+            cids = np.arange(self.covariates['robs'].shape[1])
+
+        sta2 = self.get_stas(inds=inds, square=True)
+        spower = sta2[...,cids].std(dim=0)
+        spatial_power = torch.einsum('whn,n->wh', spower, self.covariates['robs'][:,cids].sum(dim=0)/self.covariates['robs'][:,cids].sum())
+        spatial_power[spatial_power < .5*spatial_power.max()] = 0 # remove noise floor
+        spatial_power /= spatial_power.sum()
+
+        xx,yy = torch.meshgrid(torch.arange(0, sta2.shape[1]), torch.arange(0, sta2.shape[2]))
+
+        ctr_x = (spatial_power * yy).sum().item()
+        ctr_y = (spatial_power * xx).sum().item()
         
-        import os
+        if plot:
+            import matplotlib.pyplot as plt
+            plt.imshow(spatial_power.detach().numpy())
+            plt.plot(ctr_x, ctr_y, 'rx')
+
+        x0 = int(ctr_x) - int(np.ceil(win_size/2))
+        x1 = int(ctr_x) + int(np.floor(win_size/2))
+        y0 = int(ctr_y) - int(np.ceil(win_size/2))
+        y1 = int(ctr_y) + int(np.floor(win_size/2))
+
+        if plot:
+            plt.plot([x0,x1,x1,x0,x0], [y0,y0,y1,y1,y0], 'r')
+
+        return [y0,y1,x0,x1]
+    
+    def get_firing_rate_batch(self, batch_size=1000):
         r = [] # m
         rsd = []
         ft = []
@@ -517,14 +592,26 @@ class Pixel(Dataset):
         ftend = np.asarray(ftend).flatten()
         r = np.asarray(r)
         rsd = np.asarray(rsd)
+        return r, rsd, ft, ftend
 
-        z0 = np.mean(rsd, axis=0)
-        z1 = np.std(rsd, axis=0)
-        zs = (rsd - z0)/z1
+    def compute_datafilters(self, batch_size=240, verbose=False, to_plot=False):
+        
+        import matplotlib.pyplot as plt
 
-        dfs = np.logical_and(zs > -sd_thresh, zs < sd_thresh)
-        dfs[np.sum(dfs, axis=1)<.9*rsd.shape[1],:] = False
-        dfs[r==0] = False
+        from NDNT.utils.ConwayUtils import firingrate_datafilter
+        fr, _, ft, ftend = self.get_firing_rate_batch(batch_size=batch_size)
+        fr = fr*240
+        df = np.zeros(fr.shape)
+        for cc in range(fr.shape[1]):
+            df[:,cc] = firingrate_datafilter( fr[:,cc], Lmedian=10, Lhole=30, FRcut=1.0, frac_reject=0.1, to_plot=verbose, verbose=verbose )
+
+        if to_plot:
+            plt.figure(figsize=(10,5))
+            plt.imshow(df.T, aspect='auto', interpolation='none')
+            plt.xlabel("Batch")
+            plt.ylabel("Unit ID")
+
+        dfs = df>0
 
         bad_epochs_start = []
         bad_epochs_stop = []
@@ -602,6 +689,10 @@ class Pixel(Dataset):
         out = {'stim': s} # stim has already been processed
         covs = list(self.covariates.keys())
         covs.remove('stim')
+        if self.embed_eyepos:
+            covs.remove('eyepos')
+            out['eyepos'] = self.covariates['eyepos'][self.valid_idx[idx,None]-range(self.num_lags),:]
+
         for cov in covs:
             out[cov] = self.covariates[cov][self.valid_idx[idx],:]
 
