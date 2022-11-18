@@ -193,6 +193,8 @@ class Pixel(Dataset):
 
             self.covariates['fixation_onset'] = sacfull[:self.covariates['stim'].shape[-1],:]
             self.fixation_onset_ctrs = ctrs
+            self.fixation_onset_basis = torch.from_numpy(B)
+
             print("Done")
             
         if 'frame_tent' in covariate_requests.keys():
@@ -209,6 +211,7 @@ class Pixel(Dataset):
     
             self.covariates['frame_tent'] = x
             self.frame_tent_ctrs = ctrs
+            
             print("Done")
             
             
