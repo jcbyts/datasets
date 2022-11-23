@@ -597,24 +597,55 @@ class Pixel(Dataset):
         rsd = np.asarray(rsd)
         return r, rsd, ft, ftend
 
-    def compute_datafilters(self, batch_size=240, verbose=False, to_plot=False):
+    def compute_datafilters(self, batch_size=240,
+        tmin = 0.5, tmax = 2,
+        frac_exclude = 0.1,
+        verbose=False, to_plot=False):
         
         import matplotlib.pyplot as plt
 
-        from NDNT.utils.ConwayUtils import firingrate_datafilter
-        fr, _, ft, ftend = self.get_firing_rate_batch(batch_size=batch_size)
-        fr = fr*240
-        df = np.zeros(fr.shape)
-        for cc in range(fr.shape[1]):
-            df[:,cc] = firingrate_datafilter( fr[:,cc], Lmedian=10, Lhole=30, FRcut=1.0, frac_reject=0.1, to_plot=verbose, verbose=verbose )
+        # from NDNT.utils.ConwayUtils import firingrate_datafilter
+        fr, frsd, ft, ftend = self.get_firing_rate_batch(batch_size=batch_size)
+        # fr = fr*240
+        # df = np.zeros(fr.shape)
+        # for cc in range(fr.shape[1]):
+        #     df[:,cc] = firingrate_datafilter( fr[:,cc], Lmedian=10, Lhole=30, FRcut=1.0, frac_reject=0.1, to_plot=verbose, verbose=verbose )
+
+        # if to_plot:
+        #     plt.figure(figsize=(10,5))
+        #     plt.imshow(df.T, aspect='auto', interpolation='none')
+        #     plt.xlabel("Batch")
+        #     plt.ylabel("Unit ID")
+
+        # dfs = df>0
+
+        FR = (fr/np.mean(fr, axis=0)).T
+        SD = (frsd/np.mean(frsd, axis=0)).T
 
         if to_plot:
             plt.figure(figsize=(10,5))
-            plt.imshow(df.T, aspect='auto', interpolation='none')
-            plt.xlabel("Batch")
-            plt.ylabel("Unit ID")
+            plt.subplot(2,1,1)
+            plt.imshow(FR, interpolation='none', vmin=0, vmax=4)
+            plt.colorbar()
+            plt.subplot(2,1,2)
+            plt.imshow(SD, interpolation='none', vmin=0, vmax=4)
+            plt.colorbar()
 
-        dfs = df>0
+
+        FRThresh = np.logical_or(FR < tmin, FR > tmax)
+        SDThresh = np.logical_or(SD < tmin, SD > tmax)
+        BAD = np.logical_or(FRThresh, SDThresh)
+
+        if to_plot:
+            plt.figure(figsize=(10,5))
+            plt.subplot(2,1,1)
+            plt.imshow(FRThresh, interpolation='none')
+            plt.colorbar()
+            plt.subplot(2,1,2)
+            plt.imshow(SDThresh, interpolation='none')
+            plt.colorbar()
+
+        dfs = BAD>0
 
         bad_epochs_start = []
         bad_epochs_stop = []
@@ -635,7 +666,7 @@ class Pixel(Dataset):
         
         self.covariates['dfs'] = big_dfs
         # remove bad valid indices
-        iix = np.where((big_dfs[self.valid_idx,:].sum(dim=1)==0).numpy())[0]
+        iix = np.where((big_dfs[self.valid_idx,:].mean(dim=1)<frac_exclude).numpy())[0]
         self.valid_idx = np.delete(self.valid_idx, iix)
 
 
