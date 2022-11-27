@@ -171,12 +171,12 @@ class Pixel(Dataset):
             sacstim[fix_start] = 1
 
             # make basis
-            off = ctrs[0] - step
+            off = ctrs[0]
             if step >= 1:
                 dt = 1 # assuming frame id instead of seconds
             else:
                 dt = np.median(np.abs(np.diff(self.covariates['frame_times'], axis=0)))
-            t = np.arange(off, ctrs[-1] + step, dt)
+            t = np.arange(off, ctrs[-1], dt)
             B = np.maximum(0, 1-np.abs(t[:,None] - ctrs)/step)
             roll = int(np.round(off/dt))
             sacstim = np.roll(sacstim, roll, axis=0)
@@ -266,7 +266,8 @@ class Pixel(Dataset):
                 'robs': np.zeros(  [runninglength, self.NC], dtype=np.float32),
                 'dfs': np.zeros(   [runninglength, self.NC], dtype=np.float32),
                 'eyepos': np.zeros([runninglength, 2], dtype=np.float32),
-                'frame_times': np.zeros([runninglength,1], dtype=np.float32)}
+                'frame_times': np.zeros([runninglength,1], dtype=np.float32),
+                'stimid': np.zeros([runninglength,1], dtype=np.float32)}
 
         for expt in self.sess_list:
             
@@ -281,6 +282,8 @@ class Pixel(Dataset):
 
                     self.covariates['stim'][0, :sz[0], :sz[1], inds] = np.transpose(fhandle[stim][self.stimset]['Stim'][...], [2,0,1])
                     self.covariates['frame_times'][inds] = fhandle[stim][self.stimset]['frameTimesOe'][...].T
+                    stimid = np.where(np.in1d(self.requested_stims, stim))[0][0]
+                    self.covariates['stimid'][inds] = stimid
 
                     """ EYE POSITION """
                     ppd = fhandle[stim][self.stimset]['Stim'].attrs['ppd'][0]
@@ -460,7 +463,7 @@ class Pixel(Dataset):
 
         return valid
     
-    def get_fixation_indices(self, index_valid=False):
+    def get_fixation_indices(self, index_valid=False, restrict_eyevar=False):
         fixations = []
         for sess in self.sess_list:
             for stim in self.stim_indices[sess].keys():
@@ -471,36 +474,45 @@ class Pixel(Dataset):
                         fix_inds = np.where(np.in1d(self.valid_idx, fix_inds))[0]
                     if len(fix_inds)>0:    
                         fixations.append(fix_inds)
-        
-        num_fix = len(fixations)
-        v = np.zeros(num_fix)
-        for i in range(num_fix):
-            if isinstance(fixations[i], np.int64) or len(fixations[i]) < 10:
-                continue
-            else:
-                if isinstance(self.covariates['eyepos'], torch.Tensor):
-                    v[i] = torch.hypot(self.covariates['eyepos'][fixations[i][5:],0], self.covariates['eyepos'][fixations[i][5:],1]).var().item()
+        if restrict_eyevar:
+            num_fix = len(fixations)
+            v = np.zeros(num_fix)
+            for i in range(num_fix):
+                if isinstance(fixations[i], np.int64) or len(fixations[i]) < 10:
+                    continue
                 else:
-                    v[i] = np.var(np.hypot(self.covariates['eyepos'][fixations[i][5:],0], self.covariates['eyepos'][fixations[i][5:],1]))
+                    if isinstance(self.covariates['eyepos'], torch.Tensor):
+                        v[i] = torch.hypot(self.covariates['eyepos'][fixations[i][5:],0], self.covariates['eyepos'][fixations[i][5:],1]).var().item()
+                    else:
+                        v[i] = np.var(np.hypot(self.covariates['eyepos'][fixations[i][5:],0], self.covariates['eyepos'][fixations[i][5:],1]))
 
-        v[np.isnan(v)] = 100
+            v[np.isnan(v)] = 100
 
-        fixations = [fixations[f] for f in np.where(v < .1)[0]]
+            fixations = [fixations[f] for f in np.where(v < .1)[0]]
 
         return fixations
     
-    def get_train_indices(self, seed=1234, frac_train=0.8):
+    def get_train_indices(self, seed=1234, frac_train=0.8, max_sample=None):
 
-        fixations = self.get_fixation_indices()
+        fixations = self.get_fixation_indices(index_valid=True)
+        fixations = [np.maximum(np.concatenate( (np.arange(f[0]-10, f[0]) , f)), 0) for f in fixations]
+
         nfix = len(fixations)
         np.random.seed(seed)
         train_fix = np.random.choice(nfix, size=int(frac_train*nfix), replace=False)
+        
 
         fixes = np.asarray(fixations, dtype=object)
-
         train_inds = np.concatenate(fixes[train_fix])
-
-        train_inds = np.where(np.in1d(self.valid_idx, train_inds))[0]
+        if max_sample is not None:
+            train_inds = train_inds[:max_sample]
+        
+        unique_inds, ind = np.unique(train_inds, return_index=True)
+        new_inds = np.nan*np.zeros(int(np.max(ind))+1)
+        new_inds[ind] = unique_inds
+        train_inds = new_inds[~np.isnan(new_inds)].astype(int)
+        
+        # train_inds = np.where(np.in1d(self.valid_idx, train_inds))[0]
         val_inds = np.setdiff1d(np.arange(len(self.valid_idx)), train_inds).tolist()
         train_inds = train_inds.tolist()
 
@@ -597,44 +609,20 @@ class Pixel(Dataset):
         rsd = np.asarray(rsd)
         return r, rsd, ft, ftend
 
-    def compute_datafilters(self, batch_size=240,
-        tmin = 0.5, tmax = 2,
-        frac_exclude = 0.1,
-        verbose=False, to_plot=False):
+    def compute_datafilters(self, batch_size=240, Lmedian=10, Lhole=30, FRcut=1.0, frac_reject=0.1, verbose=False, to_plot=False):
         
         import matplotlib.pyplot as plt
 
-        # from NDNT.utils.ConwayUtils import firingrate_datafilter
-        fr, frsd, ft, ftend = self.get_firing_rate_batch(batch_size=batch_size)
-        # fr = fr*240
-        # df = np.zeros(fr.shape)
-        # for cc in range(fr.shape[1]):
-        #     df[:,cc] = firingrate_datafilter( fr[:,cc], Lmedian=10, Lhole=30, FRcut=1.0, frac_reject=0.1, to_plot=verbose, verbose=verbose )
-
-        # if to_plot:
-        #     plt.figure(figsize=(10,5))
-        #     plt.imshow(df.T, aspect='auto', interpolation='none')
-        #     plt.xlabel("Batch")
-        #     plt.ylabel("Unit ID")
-
-        # dfs = df>0
-
-        FR = (fr/np.mean(fr, axis=0)).T
-        SD = (frsd/np.mean(frsd, axis=0)).T
-
-        if to_plot:
-            plt.figure(figsize=(10,5))
-            plt.subplot(2,1,1)
-            plt.imshow(FR, interpolation='none', vmin=0, vmax=4)
-            plt.colorbar()
-            plt.subplot(2,1,2)
-            plt.imshow(SD, interpolation='none', vmin=0, vmax=4)
-            plt.colorbar()
-
-
-        FRThresh = np.logical_or(FR < tmin, FR > tmax)
-        SDThresh = np.logical_or(SD < tmin, SD > tmax)
-        BAD = np.logical_or(FRThresh, SDThresh)
+        from NDNT.utils.ConwayUtils import firingrate_datafilter
+        fr, _, ft, ftend = self.get_firing_rate_batch(batch_size=batch_size)
+        fr = fr*240
+        ind = np.argsort(ft)
+        frsort = fr[ind,:]
+        df = np.zeros(fr.shape)
+        for cc in range(fr.shape[1]):
+            df[:,cc] = firingrate_datafilter( frsort[:,cc], Lmedian=Lmedian, Lhole=Lhole, FRcut=FRcut, frac_reject=frac_reject, to_plot=verbose, verbose=verbose )
+        jind = np.argsort(ind)
+        df = df[jind,:]
 
         if to_plot:
             plt.figure(figsize=(10,5))
