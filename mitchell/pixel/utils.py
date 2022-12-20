@@ -1,10 +1,9 @@
-import torch
-from torch.utils.data import Dataset
-import torch.nn.functional as F
-import numpy as np
-import h5py
-from tqdm import tqdm
 import os
+from copy import deepcopy
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from ...utils import ss
 from datasets.utils import ensure_dir, reporthook
 
 """ Available Datasets:
@@ -159,3 +158,88 @@ def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100, title=None):
             plt.suptitle(title)
 
         return shift
+    
+def firingrate_datafilter( fr, Lmedian=10, Lhole=30, FRcut=1.0, frac_reject=0.1, to_plot=False, verbose=False ):
+    """Generate data filter for neuron given firing rate over time"""
+    if to_plot:
+        verbose = True
+    def median_smoothing( f, L=5):
+        mout = deepcopy(f)
+        for tt in range(L, len(f)-L):
+            mout[tt] = np.median(f[np.arange(tt-L,tt+L)])
+        return mout
+    mx = median_smoothing(fr, L=Lmedian)
+    df = np.zeros(len(mx))
+    # pre-filter ends
+    m = np.median(fr)
+    v = np.where((mx >= m-np.sqrt(m)) & (mx <= m+np.sqrt(m)))[0]
+    df[range(v[0], v[-1])] = 1
+    m = np.median(fr[df > 0])
+    if m < FRcut:
+        # See if can salvage: see if median of 1/4 of data is above FRcut
+        msplurge = np.zeros(4)
+        L = len(mx)//4
+        for ii in range(4):
+            msplurge[ii] = np.median(mx[range(L*ii, L*(ii+1))])
+        m = np.max(msplurge)
+        if m < FRcut:
+            if verbose:
+                print('  Median criterium fail: %f'%m)
+            return np.zeros(len(mx))
+        # Otherwise back in game: looking for higher median
+    v = np.where((mx >= m-np.sqrt(m)) & (mx <= m+np.sqrt(m)))[0]
+    df = np.zeros(len(mx))
+    df[range(v[0], v[-1]+1)] = 1
+    # Last
+    m = np.median(fr[df > 0])
+    v = np.where((mx >= m-np.sqrt(m)) & (mx <= m+np.sqrt(m)))[0]
+    # Look for largest holes
+    ind = np.argmax(np.diff(v))
+    largest_hole = np.arange(v[ind], v[ind+1])
+    if len(largest_hole) > Lhole:
+        if verbose:
+            print('  Removing hole size=%d'%len(largest_hole))
+        df[largest_hole] = 0
+        # Decide whether to remove one side of hole or other based on consistent firing rate change after the hole
+        chunks = [np.arange(v[0], largest_hole[0]), np.arange(largest_hole[-1], v[-1])]
+        mfrs = [np.median(fr[chunks[0]]), np.median(fr[chunks[1]])]
+
+        if (len(chunks[0]) > len(chunks[1])) & (mfrs[0] > FRcut):
+            dom = 0
+        else: 
+            dom = 1
+        if ((mfrs[dom] > mfrs[1-dom]) & (mfrs[1-dom] < mfrs[dom]-np.sqrt(mfrs[dom]))) | \
+                ((mfrs[dom] < mfrs[1-dom]) & (mfrs[1-dom] > mfrs[dom]+np.sqrt(mfrs[dom]))):
+            #print('eliminating', 1-dom)
+            df[chunks[1-dom]] = 0
+
+    # Eliminate any small islands of validity (less than Lhole)
+    a = np.where(df == 0)[0]  # where there are zeros
+    if len(a) > 0:
+        b = np.diff(a) # the length of islands (subtracting 1: 0 is no island)
+        c = np.where((b > 1) & (b < Lhole))[0]  # the index of the islands that are the wrong size
+        # a[c] is the location of the invalid islands, b[c] is the size of these islands (but first point is zero before) 
+        for ii in range(len(c)):
+            df[a[c[ii]]+np.arange(b[c[ii]])] = 0
+
+    # Final reject criteria: large fraction of mean firing rates in trial well above median poisson limit
+    m = np.median(fr[df > 0])
+    #stability_ratio = len(np.where(Ntrack[df > 0,cc] > m+np.sqrt(m))[0])/np.sum(df > 0)
+    stability_ratio = len(np.where(abs(mx[df > 0]-m) > np.sqrt(m))[0])/np.sum(df > 0)
+    if stability_ratio > frac_reject:
+        if verbose:
+            print('  Stability criteria not met:', stability_ratio)
+        df[:] = 0
+    if to_plot:
+        ss(2,1)
+        plt.subplot(211)
+        plt.plot(fr,'b')
+        plt.plot(mx,'g')
+        plt.plot([0,len(fr)], [m, m],'k')
+        plt.plot([0,len(fr)], [m-np.sqrt(m), m-np.sqrt(m)],'r')
+        plt.plot([0,len(fr)], [m+np.sqrt(m), m+np.sqrt(m)],'r')
+        plt.subplot(212)
+        plt.plot(df)
+        plt.show()
+
+    return df

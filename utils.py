@@ -4,8 +4,32 @@ import time
 import numpy as np
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
+import matplotlib.pyplot as plt
 import torch
 from copy import deepcopy
+
+def subplot_setup(num_rows, num_cols, row_height=2, fighandle=False):
+    fig, ax = plt.subplots(nrows=num_rows, ncols=num_cols)
+    fig.set_size_inches(16, row_height*num_rows)
+    fig.tight_layout()
+    if fighandle is True:
+        return fig
+
+
+def ss( num_rows=1, num_cols=1, row_height=2.5, rh=None, fighandle=False):
+    # Short-hand for subplot_setup with useful defaults for quick usage
+    if rh is not None:
+        row_height=rh  # really to just save a bit of typing
+    subplot_setup(num_rows, num_cols, row_height=row_height, fighandle=fighandle)
+
+def is_int( val ):
+    """returns Boolean as to whether val is one of many types of integers"""
+    if isinstance(val, int) or \
+        isinstance(val, np.int) or isinstance(val, np.int32) or isinstance(val, np.int64) or \
+        (isinstance(val, np.ndarray) and (len(val.shape) == 0)):
+        return True
+    else:
+        return False
 
 def download_file(url: str, file_name: str):
     '''
