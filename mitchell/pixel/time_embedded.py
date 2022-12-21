@@ -587,66 +587,68 @@ class Pixel(Dataset):
 
         return [y0,y1,x0,x1]
     
-    def get_firing_rate_batch(self, batch_size=1000):
-        r = [] # m
-        rsd = []
-        ft = []
-        ftend = []
+    def get_firing_rate_batch(self, batch_size=1000, inds=None):
+        '''
+        get the average firing rate in batches of size 'batch_size' [default=1000]
 
-        NT = self.covariates['robs'].shape[0]
-        nbatch = NT // batch_size
+        output:
+        r [Nbatch x NC] - average spike count
+        inds [Nbatch x 1] - list of indices that correspond to each batch
+
+        '''
         r = []
-        for i in range(nbatch):
-            rtmp = self.covariates['robs'][range(i*batch_size, i*batch_size+batch_size),:]
-            r.append(rtmp.mean(dim=0).detach().numpy())
-            rsd.append(rtmp.std(dim=0).detach().numpy())
-            ft.append(self.covariates['frame_times'][i*batch_size].detach().numpy())
-            ftend.append(self.covariates['frame_times'][i*batch_size+batch_size].detach().numpy())
+        out_inds = []
+    
 
-        ft = np.asarray(ft).flatten()
-        ftend = np.asarray(ftend).flatten()
+        if inds is None:
+            inds = np.arange(self.covariates['robs'].shape[0])
+        
+        NT = len(inds)
+        nbatch = NT // batch_size
+
+        for i in range(nbatch):
+            iix = inds[range(i*batch_size, i*batch_size+batch_size)]
+            skips = np.diff(inds) > 1
+            if np.any(skips):
+                iix = iix[:np.where(skips)[0][0]]
+            
+            n = len(iix)
+            if n == 0:
+                continue
+            
+            rtmp = self.covariates['robs'][iix,:]
+            out_inds.append(iix)
+            r.append(rtmp.mean(dim=0).detach().numpy())
+
         r = np.asarray(r)
-        rsd = np.asarray(rsd)
-        return r, rsd, ft, ftend
+        return r, out_inds
 
     def compute_datafilters(self, batch_size=240, Lmedian=10, Lhole=30, FRcut=1.0, frac_reject=0.1, verbose=False, to_plot=False):
-        
-        import matplotlib.pyplot as plt
+        '''
+        compute datafilters per session, per stimulus, per neuron
 
-        fr, _, ft, ftend = self.get_firing_rate_batch(batch_size=batch_size)
-        fr = fr*240
-        ind = np.argsort(ft)
-        frsort = fr[ind,:]
-        df = np.zeros(fr.shape)
-        for cc in range(fr.shape[1]):
-            df[:,cc] = firingrate_datafilter( frsort[:,cc], Lmedian=Lmedian, Lhole=Lhole, FRcut=FRcut, frac_reject=frac_reject, to_plot=verbose, verbose=verbose )
-        jind = np.argsort(ind)
-        df = df[jind,:]
+        Datafilters creates a mask for the loss function where specific samples are excluded fromt he loss computation.
 
-        if to_plot:
-            plt.figure(figsize=(10,5))
-            plt.imshow(df.T, aspect='auto', interpolation='none')
-            plt.xlabel("Batch")
-            plt.ylabel("Unit ID")
-
-        dfs = df>0
-
-        bad_epochs_start = []
-        bad_epochs_stop = []
-        for cc in range(self.NC):
-            ii = np.where(~dfs[:,cc])[0]
-            
-            bad_epochs_start.append(ft[ii])
-            bad_epochs_stop.append(ftend[ii])
-
-        frame_times = self.covariates['frame_times'].clone()
-
+        Loop over sessions, stimuli, and neurons, looking for extreme deviations in firing rate.
+        These will be masked out of the loss computation.
+        '''
         big_dfs = self.covariates['dfs'].clone()
-        for cc in range(self.NC):
-            for epoch_start, epoch_stop in zip(bad_epochs_start[cc], bad_epochs_stop[cc]):
+        for isess in range(len(self.sess_list)):
+            for istim in range(len(self.requested_stims)):
+                # get indices for this experimental session and stimulus
+                inds = np.where(np.logical_and(self.covariates['sessid']==isess, self.covariates['stimid']==istim))[0]
+
+                fr, out_inds = self.get_firing_rate_batch(batch_size=batch_size, inds=inds)
                 
-                bad = np.where(np.logical_and(frame_times > epoch_start, frame_times < epoch_stop))[0]
-                big_dfs[bad,cc]=0
+                # convert mean count to rate using frame rate
+                frate = self.stim_indices[self.sess_list[isess]][self.requested_stims[istim]]['frate']
+                fr = fr*frate
+
+                # loop over neurons and create datafilter
+                for cc in range(fr.shape[1]):
+                    df_ = firingrate_datafilter( fr[:,cc], Lmedian=Lmedian, Lhole=Lhole, FRcut=FRcut, frac_reject=frac_reject, to_plot=verbose, verbose=verbose )
+                    for ibatch in range(len(df_)):
+                        big_dfs[out_inds[ibatch],cc] = df_[ibatch]
         
         self.covariates['dfs'] = big_dfs
         # remove bad valid indices
