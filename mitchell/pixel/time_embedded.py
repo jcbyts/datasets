@@ -3,8 +3,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import h5py
 import os
-from .utils import get_stim_list, download_set, firingrate_datafilter
-from datasets.mitchell.pixel.utils import shift_im
+from .utils import get_stim_list, download_set, firingrate_datafilter, shift_im
 
 class Pixel(Dataset):
     '''
