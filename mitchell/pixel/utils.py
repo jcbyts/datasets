@@ -140,22 +140,31 @@ def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100, title=None):
 
         xyshift = shifter(inputs).detach().numpy()
 
-        xyshift/=valid_eye_rad/60 # conver to arcmin
+        # xyshift/=valid_eye_rad/60 # conver to arcmin
         vmin = np.min(xyshift)
         vmax = np.max(xyshift)
 
-        shift = [xyshift[:,0].reshape((ngrid,ngrid))]
-        shift.append(xyshift[:,1].reshape((ngrid,ngrid))) 
-        plt.figure(figsize=(6,3))
-        plt.subplot(1,2,1)
-        plt.imshow(shift[0], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None, vmin=vmin, vmax=vmax)
-        plt.colorbar()
-        plt.subplot(1,2,2)
-        plt.imshow(shift[1], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None, vmin=vmin, vmax=vmax)
-        plt.colorbar()
+        nshift = xyshift.shape[1]
+        shift = []
+        plt.figure(figsize=(3*nshift,3))
+        for ishift in range(nshift):
+            shift.append(xyshift[:,ishift].reshape((ngrid, ngrid)))
+            plt.subplot(1,nshift, ishift+1)
+            plt.imshow(shift[-1], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None)
+            plt.colorbar()
+        
+        # # shift = [xyshift[:,0].reshape((ngrid,ngrid))]
+        # # shift.append(xyshift[:,1].reshape((ngrid,ngrid))) 
+        
+        # plt.subplot(1,2,1)
+        # plt.imshow(shift[0], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None, vmin=vmin, vmax=vmax)
+        # plt.colorbar()
+        # plt.subplot(1,2,2)
+        # plt.imshow(shift[1], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None, vmin=vmin, vmax=vmax)
+        
         plt.show()
-        if title is not None:
-            plt.suptitle(title)
+        # if title is not None:
+        #     plt.suptitle(title)
 
         return shift
     
