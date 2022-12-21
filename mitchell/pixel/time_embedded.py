@@ -218,7 +218,7 @@ class Pixel(Dataset):
             
         self.device = device
         if load_shifters:
-            shifters = self.get_shifters(plot=True)
+            shifters = self.get_shifters(plot=False)
             self.correct_stim(shifters)
         
         self.shift = None
@@ -265,7 +265,8 @@ class Pixel(Dataset):
                 'dfs': np.zeros(   [runninglength, self.NC], dtype=np.float32),
                 'eyepos': np.zeros([runninglength, 2], dtype=np.float32),
                 'frame_times': np.zeros([runninglength,1], dtype=np.float32),
-                'stimid': np.zeros([runninglength,1], dtype=np.float32)}
+                'stimid': np.zeros([runninglength,1], dtype=np.float32),
+                'sessid': np.zeros([runninglength,1], dtype=np.float32)}
 
         for expt in self.sess_list:
             
@@ -282,6 +283,7 @@ class Pixel(Dataset):
                     self.covariates['frame_times'][inds] = fhandle[stim][self.stimset]['frameTimesOe'][...].T
                     stimid = np.where(np.in1d(self.requested_stims, stim))[0][0]
                     self.covariates['stimid'][inds] = stimid
+                    self.covariates['sessid'][inds] = np.where(np.in1d(expt, self.sess_list))[0][0]
 
                     """ EYE POSITION """
                     ppd = fhandle[stim][self.stimset]['Stim'].attrs['ppd'][0]
