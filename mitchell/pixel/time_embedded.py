@@ -1,11 +1,9 @@
 import torch
 from torch.utils.data import Dataset
-import torch.nn.functional as F
 import numpy as np
 import h5py
 import os
-from .utils import get_stim_list, download_set
-from datasets.mitchell.pixel.utils import shift_im
+from .utils import get_stim_list, download_set, firingrate_datafilter, shift_im
 
 class Pixel(Dataset):
     '''
@@ -613,7 +611,6 @@ class Pixel(Dataset):
         
         import matplotlib.pyplot as plt
 
-        from NDNT.utils.ConwayUtils import firingrate_datafilter
         fr, _, ft, ftend = self.get_firing_rate_batch(batch_size=batch_size)
         fr = fr*240
         ind = np.argsort(ft)
@@ -626,14 +623,11 @@ class Pixel(Dataset):
 
         if to_plot:
             plt.figure(figsize=(10,5))
-            plt.subplot(2,1,1)
-            plt.imshow(FRThresh, interpolation='none')
-            plt.colorbar()
-            plt.subplot(2,1,2)
-            plt.imshow(SDThresh, interpolation='none')
-            plt.colorbar()
+            plt.imshow(df.T, aspect='auto', interpolation='none')
+            plt.xlabel("Batch")
+            plt.ylabel("Unit ID")
 
-        dfs = BAD>0
+        dfs = df>0
 
         bad_epochs_start = []
         bad_epochs_stop = []
@@ -654,7 +648,7 @@ class Pixel(Dataset):
         
         self.covariates['dfs'] = big_dfs
         # remove bad valid indices
-        iix = np.where((big_dfs[self.valid_idx,:].mean(dim=1)<frac_exclude).numpy())[0]
+        iix = np.where((big_dfs[self.valid_idx,:].sum(dim=1)==0).numpy())[0]
         self.valid_idx = np.delete(self.valid_idx, iix)
 
 

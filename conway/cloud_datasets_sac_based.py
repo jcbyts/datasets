@@ -1,15 +1,10 @@
-
 import os
 import numpy as np
-import scipy.io as sio
-
 import torch
 from torch.utils.data import Dataset
-import NDNT.utils as utils
-#from NDNT.utils import download_file, ensure_dir
+from ..utils import is_int
 from copy import deepcopy
 import h5py
-
 
 class ColorClouds(Dataset):
     """
@@ -345,7 +340,7 @@ class ColorClouds(Dataset):
 
     def __getitem__(self, index):
         
-        if utils.is_int(index):
+        if is_int(index):
             index = [index]
         elif type(index) is slice:
             index = list(range(index.start or 0, index.stop or len(self.block_inds), index.step or 1))
