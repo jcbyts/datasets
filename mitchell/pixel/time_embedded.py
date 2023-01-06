@@ -148,71 +148,14 @@ class Pixel(Dataset):
 
         # Handle requested covariates
         if 'fixation_num' in covariate_requests.keys():
-            print("Loading fixation number covariate...")
-            fix_inds = self.get_fixation_indices()
-            self.covariates['fixation_num'] = np.zeros((self.covariates['stim'].shape[-1], 1))
-            for num, fix in enumerate(fix_inds):
-                self.covariates['fixation_num'][fix] = num
-            print("Done")
-
+            self.addFixNumCovariate()
+            
         if 'fixation_onset' in covariate_requests.keys():
-            print("Loading fixation onset covariate...")
-            fix_inds = self.get_fixation_indices()
-            fix_start = [fix[0] for fix in fix_inds]
-            # nfix = len(fix_start)
-
-            ctrs = covariate_requests['fixation_onset']['tent_ctrs']
-            step = np.mean(np.diff(ctrs))
-            nlags = len(ctrs)
-
-            sacstim = np.zeros((self.covariates['stim'].shape[-1], 1))
-            sacstim[fix_start] = 1
-
-            # make basis
-            off = ctrs[0]
-            if step >= 1:
-                dt = 1 # assuming frame id instead of seconds
-            else:
-                dt = np.median(np.abs(np.diff(self.covariates['frame_times'], axis=0)))
-            t = np.arange(off, ctrs[-1], dt)
-            B = np.maximum(0, 1-np.abs(t[:,None] - ctrs)/step)
-            roll = int(np.round(off/dt))
-            sacstim = np.roll(sacstim, roll, axis=0)
-
-            # zero out invalid after shift
-            if off < 0:
-                sacstim[roll:,0] = 0
-            elif off > 0:
-                sacstim[:roll,0] = 0
-                    
-            # convolve with basis
-            from scipy.signal import fftconvolve
-            sacfull = fftconvolve(sacstim, B, mode="full")
-
-            self.covariates['fixation_onset'] = sacfull[:self.covariates['stim'].shape[-1],:]
-            self.fixation_onset_ctrs = ctrs
-            self.fixation_onset_basis = torch.from_numpy(B)
-
-            print("Done")
+            self.addFixOnCovariate(covariate_requests['fixation_onset'])
             
         if 'frame_tent' in covariate_requests.keys():
-            print("Loading frame tent covariate...")
-            ntents = covariate_requests['frame_tent']['ntents']
-            ctrs = np.linspace(self.covariates['frame_times'].min(), self.covariates['frame_times'].max(), ntents)
-            step = np.mean(np.diff(ctrs)/2)
-            nlags = len(ctrs)
+            self.addFrameCovariate(covariate_requests['frame_tent'])
 
-            self.covariates['frame_tent'] = np.zeros((len(self.covariates['frame_times']), nlags))
-            
-            x = np.abs(self.covariates['frame_times'] - ctrs)
-            x = np.maximum(0, ( 1-x/step ))
-    
-            self.covariates['frame_tent'] = x
-            self.frame_tent_ctrs = ctrs
-            
-            print("Done")
-            
-            
         if device is not None:
             self.to_tensor(device)
             
@@ -246,15 +189,17 @@ class Pixel(Dataset):
         self.dims[2] = self._crop_idx[3] - self._crop_idx[2]
 
     def to_tensor(self, device):
+        '''
+        All covariates are stored in a dictionary.
+        Loop over keys and move to tensor on specified device.
+        '''
         for cov in self.covariates.keys():
             self.covariates[cov] = torch.from_numpy(self.covariates[cov].astype('float32')).to(device)
-        # self.stim = torch.tensor(self.stim, dtype=self.dtype, device=device)
-        # self.robs = torch.tensor(self.robs.astype('float32'), dtype=self.dtype, device=device)
-        # self.dfs = torch.tensor(self.dfs.astype('float32'), dtype=self.dtype, device=device)
-        # self.eyepos = torch.tensor(self.eyepos.astype('float32'), dtype=self.dtype, device=device)
-        # self.frame_times = torch.tensor(self.frame_times.astype('float32'), dtype=self.dtype, device=device)
 
     def preload_numpy(self):
+        '''
+        Preload the datasets into memory
+        '''
         
         runninglength = self.runninglength
         ''' 
@@ -268,6 +213,9 @@ class Pixel(Dataset):
                 'stimid': np.zeros([runninglength,1], dtype=np.float32),
                 'sessid': np.zeros([runninglength,1], dtype=np.float32)}
 
+        '''
+        Loop over all requested sessions, stimuli
+        '''
         for expt in self.sess_list:
             
             fhandle = self.fhandles[expt]
@@ -330,8 +278,105 @@ class Pixel(Dataset):
                     for unit in unit_ids:
                         self.covariates['dfs'][inds, unit] = 1
 
+    '''
+    If extra covariates are requested for modeling besides the stimulus, we have to build them into the covariates dictionary.
+    '''
+    def addFixNumCovariate(self, verbose=True):
+        if verbose:
+            print("Loading fixation number covariate...")
+        fix_inds = self.get_fixation_indices()
+        self.covariates['fixation_num'] = np.zeros((self.covariates['stim'].shape[-1], 1))
+        for num, fix in enumerate(fix_inds):
+            self.covariates['fixation_num'][fix] = num
+        if verbose:
+            print("Done")
+
+    def addFixOnCovariate(self, cov, verbose=True):
+        '''
+        Add a covariate to capture per-saccadic effects that cannot be captured by the stimulus
+
+        cov is a dictionary with required field 'tent_ctrs'
+        negative tent_ctrs will occur before fixation onset
 
         
+          ctrs[0]        ...      ctrs[-1]
+            v                        v
+            /\/\/\/\/\/\/\/\/\/\/\/\/\ 
+           / /\/\/\/\/\/\/\/\/\/\/\/\ \ 
+                ^
+            fixation onset
+        '''
+        if verbose:
+            print("Loading fixation onset covariate...")
+        fix_inds = self.get_fixation_indices() 
+        fix_start = [fix[0] for fix in fix_inds]
+
+        ctrs = cov['tent_ctrs'] # the centers of 
+        step = np.mean(np.diff(ctrs))
+        nlags = len(ctrs)
+
+        sacstim = np.zeros((self.covariates['stim'].shape[-1], 1))
+        sacstim[fix_start] = 1
+
+        # make basis
+        off = ctrs[0]
+        if step >= 1:
+            dt = 1 # assuming frame id instead of seconds
+        else:
+            dt = np.median(np.abs(np.diff(self.covariates['frame_times'], axis=0)))
+        t = np.arange(off, ctrs[-1], dt)
+        B = np.maximum(0, 1-np.abs(t[:,None] - ctrs)/step)
+        roll = int(np.round(off/dt))
+        sacstim = np.roll(sacstim, roll, axis=0)
+
+        # zero out invalid after shift
+        if off < 0:
+            sacstim[roll:,0] = 0
+        elif off > 0:
+            sacstim[:roll,0] = 0
+                
+        # convolve with basis
+        from scipy.signal import fftconvolve
+        sacfull = fftconvolve(sacstim, B, mode="full")
+
+        self.covariates['fixation_onset'] = sacfull[:self.covariates['stim'].shape[-1],:]
+        self.fixation_onset_ctrs = ctrs
+        self.fixation_onset_basis = torch.from_numpy(B)
+        if verbose:
+            print("Done")
+    
+    def addFrameCovariate(self, cov, verbose=True):
+        '''
+        Add a covariate to capture slow drift in firing rate throughout
+        The idea is to take all the frames and represent them on a basis across the experiment
+        so that a linear combination of those basis functions creates a slowly drifting baseline firing rate.
+
+        Basis:
+          /\  /\  /\   
+         /  \/  \/  \ 
+        /   /\  /\   \ 
+        Experiment time -->
+
+        '''
+        if verbose:
+            print("Loading frame tent covariate...")
+        
+        ntents = cov['ntents']
+        ctrs = np.linspace(self.covariates['frame_times'].min(), self.covariates['frame_times'].max(), ntents)
+        step = np.mean(np.diff(ctrs)/2)
+        nlags = len(ctrs)
+
+        self.covariates['frame_tent'] = np.zeros((len(self.covariates['frame_times']), nlags))
+        
+        x = np.abs(self.covariates['frame_times'] - ctrs)
+        x = np.maximum(0, ( 1-x/step ))
+
+        self.covariates['frame_tent'] = x
+        self.frame_tent_ctrs = ctrs
+        
+        if verbose:
+            print("Done")
+
     def download_stim_files(self, download=True):
         if not download:
             return
@@ -357,13 +402,12 @@ class Pixel(Dataset):
             if len(sfname) == 0:
                 from datasets.mitchell.pixel.utils import download_shifter
                 download_shifter(sess, self.dirname)
-            else:
-                print("Shifter exists")
-                import pickle
-                fname = os.path.join(self.dirname, sfname[0])
-                print("Loading shifter from %s" % fname)
-                shifter_res = pickle.load(open(fname, "rb"))
-                shifter = shifter_res['shifters'][np.argmin(shifter_res['vallos'])]
+                
+            import pickle
+            fname = os.path.join(self.dirname, sfname[0])
+            print("Loading shifter from %s" % fname)
+            shifter_res = pickle.load(open(fname, "rb"))
+            shifter = shifter_res['shifters'][np.argmin(shifter_res['vallos'])]
 
             if plot:
                 from datasets.mitchell.pixel.utils import plot_shifter
@@ -401,14 +445,6 @@ class Pixel(Dataset):
                             if len(ii)>0:
                                 shift[ii,:] = shift[ii,:].mean(dim=0)
 
-                    # ninds = len(inds)
-                    # batch_size = 5000
-                    # nbatch = ninds//batch_size + 1
-                    # for ibatch in range(nbatch):
-                    #     ii = np.arange(batch_size)+batch_size*ibatch
-                    #     if ibatch==(nbatch-1):
-                    #         ii = ii[ii < ninds]
-                    #         self.covariates['stim'][...,inds[ii]] = shift_im(self.covariates['stim'][...,inds[ii]].permute(3,0,1,2), shift[ii,:], mode='bicubic', upsample=4).permute(1,2,3,0)
                     self.covariates['stim'][...,inds] = shift_im(self.covariates['stim'][...,inds].permute(3,0,1,2), shift, mode='bilinear', upsample=2).permute(1,2,3,0)
                     self.stim_indices[sess][stim]['corrected'] = True
         
