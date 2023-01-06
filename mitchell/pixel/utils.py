@@ -100,35 +100,48 @@ def download_shifter(sessname, fpath):
     print("Done")
 
 
-def shift_im(im, shift, mode='nearest', upsample=1):
-        """
-        apply shifter to translate stimulus as a function of the eye position
-        im = N x C x H x W (torch.float32)
-        shift = N x 2 (torch.float32), shift along W and H, respectively
-        """
-        import torch.nn.functional as F
-        import torch
-        affine_trans = torch.tensor([[[1., 0., 0.], [0., 1., 0.]]])
-        sz = im.shape
+def shift_im(stim, shift, affine=False, mode='nearest'):
+    '''
+    Primary function for shifting the intput stimulus
+    Inputs:
+        stim [Batch x channels x height x width] (use Fold2d to fold lags if necessary)
+        shift [Batch x 2] or [Batch x 4] if translation only or affine
+        affine [Boolean] set to True if using affine transformation
+        mode [str] 'nearest' (default)
+    '''
+    import torch.nn.functional as F
+    batch_size = stim.shape[0]
 
-        aff = torch.tensor([[1,0,0],[0,1,0]])
+    # build affine transformation matrix size = [batch x 2 x 3]
+    affine_trans = torch.zeros((batch_size, 2, 3) , dtype=stim.dtype, device=stim.device)
+    
+    if affine:
+        # fill in rotation and scaling
+        costheta = torch.cos(shift[:,2].clamp(-.5, .5))
+        sintheta = torch.sin(shift[:,2].clamp(-.5, .5))
+        
+        scale = shift[:,3]**2 + 1.0
 
-        affine_trans = shift[:,:,None]+aff[None,:,:]
+        affine_trans[:,0,0] = costheta*scale
+        affine_trans[:,0,1] = -sintheta*scale
+        affine_trans[:,1,0] = sintheta*scale
+        affine_trans[:,1,1] = costheta*scale
+
+    else:
+        # no rotation or scaling
         affine_trans[:,0,0] = 1
         affine_trans[:,0,1] = 0
         affine_trans[:,1,0] = 0
         affine_trans[:,1,1] = 1
 
-        n = im.shape[0]
-        grid = F.affine_grid(affine_trans, torch.Size((n, 1, sz[2], sz[3])), align_corners=False)
+    # translation
+    affine_trans[:,0,2] = shift[:,0]
+    affine_trans[:,1,2] = shift[:,1]
 
-        if upsample > 1:
-            upsamp = torch.nn.UpsamplingNearest2d(scale_factor=upsample)
-            im = upsamp(im)
+    grid = F.affine_grid(affine_trans, stim.shape, align_corners=False)
 
-        im2 = F.grid_sample(im, grid, align_corners=False, mode=mode)
+    return F.grid_sample(stim, grid, mode=mode, align_corners=False).detach()
 
-        return im2.detach()
 
 def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100, title=None):
         import matplotlib.pyplot as plt
