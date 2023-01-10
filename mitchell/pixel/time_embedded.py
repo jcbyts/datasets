@@ -598,20 +598,10 @@ class Pixel(Dataset):
             cids = np.arange(self.covariates['robs'].shape[1])
 
         sta2 = self.get_stas(inds=inds, square=True)
-        spower = sta2[...,cids].std(dim=0)
-        spatial_power = torch.einsum('whn,n->wh', spower, self.covariates['robs'][:,cids].sum(dim=0)/self.covariates['robs'][:,cids].sum())
-        spatial_power[spatial_power < .5*spatial_power.max()] = 0 # remove noise floor
-        spatial_power /= spatial_power.sum()
-
-        xx,yy = torch.meshgrid(torch.arange(0, sta2.shape[1]), torch.arange(0, sta2.shape[2]))
-
-        ctr_x = (spatial_power * yy).sum().item()
-        ctr_y = (spatial_power * xx).sum().item()
+        cids = np.intersect1d(cids, np.where(~np.isnan(sta2.std(dim=(0,1,2))))[0])
         
-        if plot:
-            import matplotlib.pyplot as plt
-            plt.imshow(spatial_power.detach().numpy())
-            plt.plot(ctr_x, ctr_y, 'rx')
+        spatial_power = sta2[...,cids].std(dim=0).nanmean(dim=2).numpy()
+        ctr_y, ctr_x = np.where(spatial_power==np.max(spatial_power))
 
         x0 = int(ctr_x) - int(np.ceil(win_size/2))
         x1 = int(ctr_x) + int(np.floor(win_size/2))
@@ -619,6 +609,9 @@ class Pixel(Dataset):
         y1 = int(ctr_y) + int(np.floor(win_size/2))
 
         if plot:
+            import matplotlib.pyplot as plt
+            plt.imshow(spatial_power)
+            plt.plot(ctr_x, ctr_y, 'rx')
             plt.plot([x0,x1,x1,x0,x0], [y0,y0,y1,y1,y0], 'r')
 
         return [y0,y1,x0,x1]
