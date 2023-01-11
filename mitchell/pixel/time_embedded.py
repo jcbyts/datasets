@@ -408,14 +408,18 @@ class Pixel(Dataset):
             fname = os.path.join(self.dirname, sfname[0])
             print("Loading shifter from %s" % fname)
             shifter_res = pickle.load(open(fname, "rb"))
-            assert 'valloss' in shifter_res.keys(), "'valloss is not in keys. this means you're using an old shifter file"
-            shifter = shifter_res['shifters'][np.argmin(shifter_res['valloss'])]
+            if 'valloss' in shifter_res.keys(): # using the new version
+                shifter = shifter_res['shifters'][np.argmin(shifter_res['valloss'])]
+                shifterinfo = {'shifter': shifter, 'dims': shifter_res['input_dims']}
+            else:
+                shifter = shifter_res['shifters'][np.argmin(shifter_res['valoss'])] # one with spelling error
+                shifterinfo = {'shifter': shifter}
 
             if plot:
                 from datasets.mitchell.pixel.utils import plot_shifter
                 _ = plot_shifter(shifter, title=sess)
             
-            shifters[sess] = {'shifter': shifter, 'dims': shifter_res['input_dims']}
+            shifters[sess] = shifterinfo
 
         return shifters
 
@@ -441,9 +445,11 @@ class Pixel(Dataset):
                     inds = self.stim_indices[sess][stim]['inds']
 
                     shift = shifters[sess]['shifter'](self.covariates['eyepos'][inds,:])
-                    # TODO: check that width and height are the right dimensions (everything is square so far)
-                    shift[:,0] = shift[:,0] * shifters[sess]['dims'][1] / self.dims[1]
-                    shift[:,1] = shift[:,1] * shifters[sess]['dims'][2] / self.dims[2]
+                    
+                    if 'dims' in shifters[sess].keys():
+                        # TODO: check that width and height are the right dimensions (everything is square so far)
+                        shift[:,0] = shift[:,0] * shifters[sess]['dims'][1] / self.dims[1]
+                        shift[:,1] = shift[:,1] * shifters[sess]['dims'][2] / self.dims[2]
 
                     if enforce_fixations:
                         for ifix in range(num_fix):
