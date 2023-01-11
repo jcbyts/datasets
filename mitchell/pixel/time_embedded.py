@@ -31,7 +31,8 @@ class Pixel(Dataset):
         embed_eyepos=False,
         covariate_requests={}, # fixation_num, fixation_onset
         device=torch.device('cpu'),
-        spike_sorting='kilowf'
+        spike_sorting='kilowf',
+        enforce_fixation_shift=False,
     ):
     
         super().__init__()
@@ -162,7 +163,7 @@ class Pixel(Dataset):
         self.device = device
         if load_shifters:
             shifters = self.get_shifters(plot=False)
-            self.correct_stim(shifters)
+            self.correct_stim(shifters, enforce_fixations=enforce_fixation_shift)
         
         self.shift = None
         from copy import deepcopy
@@ -407,17 +408,18 @@ class Pixel(Dataset):
             fname = os.path.join(self.dirname, sfname[0])
             print("Loading shifter from %s" % fname)
             shifter_res = pickle.load(open(fname, "rb"))
-            shifter = shifter_res['shifters'][np.argmin(shifter_res['vallos'])]
+            assert 'valloss' in shifter_res.keys(), "'valloss is not in keys. this means you're using an old shifter file"
+            shifter = shifter_res['shifters'][np.argmin(shifter_res['valloss'])]
 
             if plot:
                 from datasets.mitchell.pixel.utils import plot_shifter
                 _ = plot_shifter(shifter, title=sess)
             
-            shifters[sess] = shifter
+            shifters[sess] = {'shifter': shifter, 'dims': shifter_res['input_dims']}
 
         return shifters
 
-    def correct_stim(self, shifters, verbose=True, enforce_fixations=True):
+    def correct_stim(self, shifters, verbose=True, enforce_fixations=False):
         if verbose:
             print("Correcting stim...")
             if enforce_fixations:
@@ -438,14 +440,18 @@ class Pixel(Dataset):
                     print("Correcting stim [%s]" % stim)
                     inds = self.stim_indices[sess][stim]['inds']
 
-                    shift = shifters[sess](self.covariates['eyepos'][inds,:])
+                    shift = shifters[sess]['shifter'](self.covariates['eyepos'][inds,:])
+                    # TODO: check that width and height are the right dimensions (everything is square so far)
+                    shift[:,0] = shift[:,0] * shifters[sess]['dims'][1] / self.dims[1]
+                    shift[:,1] = shift[:,1] * shifters[sess]['dims'][2] / self.dims[2]
+
                     if enforce_fixations:
                         for ifix in range(num_fix):
                             ii = np.where(np.in1d(inds, fix_inds[ifix]))[0]
                             if len(ii)>0:
                                 shift[ii,:] = shift[ii,:].mean(dim=0)
 
-                    self.covariates['stim'][...,inds] = shift_im(self.covariates['stim'][...,inds].permute(3,0,1,2), shift, mode='bilinear', upsample=2).permute(1,2,3,0)
+                    self.covariates['stim'][...,inds] = shift_im(self.covariates['stim'][...,inds].permute(3,0,1,2), shift, mode='nearest').permute(1,2,3,0) # TODO: should we put upsample back in?
                     self.stim_indices[sess][stim]['corrected'] = True
         
         if verbose:
@@ -591,7 +597,6 @@ class Pixel(Dataset):
         calculate STAS on the squared pixels and use that to find a cropping window
         '''
 
-
         self.crop_idx = [0, self.raw_dims[1], 0, self.raw_dims[2]] # set original crop index
 
         if cids is None:
@@ -599,7 +604,7 @@ class Pixel(Dataset):
 
         sta2 = self.get_stas(inds=inds, square=True)
         cids = np.intersect1d(cids, np.where(~np.isnan(sta2.std(dim=(0,1,2))))[0])
-        
+
         spatial_power = sta2[...,cids].std(dim=0).nanmean(dim=2).numpy()
         ctr_y, ctr_x = np.where(spatial_power==np.max(spatial_power))
 
@@ -607,7 +612,7 @@ class Pixel(Dataset):
         x1 = int(ctr_x) + int(np.floor(win_size/2))
         y0 = int(ctr_y) - int(np.ceil(win_size/2))
         y1 = int(ctr_y) + int(np.floor(win_size/2))
-
+        
         if plot:
             import matplotlib.pyplot as plt
             plt.imshow(spatial_power)
