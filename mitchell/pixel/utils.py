@@ -143,7 +143,7 @@ def shift_im(stim, shift, affine=False, mode='nearest'):
     return F.grid_sample(stim, grid, mode=mode, align_corners=False).detach()
 
 
-def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100, title=None):
+def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100, title=None, show=True):
         import matplotlib.pyplot as plt
         xx,yy = np.meshgrid(np.linspace(-valid_eye_rad, valid_eye_rad,ngrid),np.linspace(-valid_eye_rad, valid_eye_rad,ngrid))
         xgrid = torch.tensor( xx.astype('float32').reshape( (-1,1)))
@@ -159,7 +159,7 @@ def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100, title=None):
 
         nshift = xyshift.shape[1]
         shift = []
-        plt.figure(figsize=(3*nshift,3))
+        fig = plt.figure(figsize=(3*nshift,3))
         for ishift in range(nshift):
             shift.append(xyshift[:,ishift].reshape((ngrid, ngrid)))
             plt.subplot(1,nshift, ishift+1)
@@ -174,12 +174,13 @@ def plot_shifter(shifter, valid_eye_rad=5.2, ngrid = 100, title=None):
         # plt.colorbar()
         # plt.subplot(1,2,2)
         # plt.imshow(shift[1], extent=(-valid_eye_rad,valid_eye_rad,-valid_eye_rad,valid_eye_rad), interpolation=None, vmin=vmin, vmax=vmax)
-        
-        plt.show()
-        # if title is not None:
-        #     plt.suptitle(title)
+        if title is not None:
+            plt.suptitle(title)
 
-        return shift
+        if show:
+            plt.show()
+        
+        return shift, fig
     
 def firingrate_datafilter( fr, Lmedian=10, Lhole=30, FRcut=1.0, frac_reject=0.1, to_plot=False, verbose=False ):
     """Generate data filter for neuron given firing rate over time"""
