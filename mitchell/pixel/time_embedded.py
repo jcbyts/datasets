@@ -12,6 +12,7 @@ class Pixel(Dataset):
             'tent_ctrs' - array of tent centers
     'frame_tent':
             'ntents' - number of tent centers
+    'fixation_num': returns the id of each fixation
         
     '''
     
