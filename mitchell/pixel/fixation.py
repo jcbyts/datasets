@@ -3,7 +3,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import h5py
 import os
-from datasets.utils import downsample_time
+from ...utils import downsample_time
 from .utils import get_stim_list, download_set, shift_im
 
 class FixationMultiDataset(Dataset):
@@ -14,14 +14,16 @@ class FixationMultiDataset(Dataset):
         stimset="Train",
         requested_stims=["Gabor"],
         downsample_s: int=1,
-        downsample_t: int=2,
-        num_lags: int=12,
-        num_lags_pre_sac: int=12,
+        downsample_t: int=1,
+        num_lags: int=1,
+        num_lags_pre_sac: int=40,
         saccade_basis = None,
         max_fix_length: int=1000,
         download=True,
         flatten=True,
         crop_inds=None,
+        spike_sorting='kilo',
+        binarize_spikes=False,
         min_fix_length: int=50,
         valid_eye_rad=5.2,
         add_noise=0,
@@ -32,7 +34,7 @@ class FixationMultiDataset(Dataset):
         self.requested_stims = requested_stims
         self.downsample_s = downsample_s
         self.downsample_t = downsample_t
-        self.spike_sorting = 'kilowf' # only one option for now
+        self.spike_sorting = spike_sorting # only one option for now
         self.valid_eye_rad = valid_eye_rad
         self.min_fix_length = min_fix_length
         self.flatten = flatten
@@ -43,6 +45,7 @@ class FixationMultiDataset(Dataset):
         self.saccade_basis = saccade_basis
         self.shift = None # default shift to None. To provide shifts, set outside this class. Should be a list of shift values equal to size dataset.eyepos in every way
         self.add_noise = add_noise
+        self.binarize_spikes = binarize_spikes
 
         if self.saccade_basis is not None:
             if type(self.saccade_basis) is np.array:
@@ -340,6 +343,8 @@ class FixationMultiDataset(Dataset):
         fix_n = torch.cat(fix_n, dim=0)
         eyepos = torch.cat(eyepos, dim=0)
         robs = torch.cat(robs, dim=0)
+        if self.binarize_spikes:
+            robs = (robs>0).float()
         dfs = torch.cat(dfs, dim=0)
         frames = torch.cat(frames, dim=0)
 

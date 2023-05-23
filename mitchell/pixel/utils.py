@@ -3,8 +3,7 @@ from copy import deepcopy
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from ...utils import ss
-from datasets.utils import ensure_dir, reporthook
+from ...utils import ss, ensure_dir, reporthook
 
 """ Available Datasets:
 1. FixationMultiDataset - generates fixations from multiple stimulus classes 
@@ -22,6 +21,7 @@ def get_stim_list(id=None, verbose=False):
             '20191206': 'logan_20191206_-20_-10_50_60_0_19_0_1.hdf5',
             '20191231': 'logan_20191231_-20_-10_50_60_0_19_0_1.hdf5',
             '20200304': 'logan_20200304_-20_-10_50_60_0_19_0_1.hdf5',
+            '20200304C': 'logan_20200304_-31_-2_49_78_1_1_1_41_0_0.hdf5',
             '20220216': 'allen_20220216_-60_-50_10_20_0_19_0_1.hdf5',
             '20220601': 'allen_20220601_-80_-50_10_50_1_0_1_19_0_1.hdf5',
             '20220601fix': 'allen_20220601_-80_-50_10_50_0_0_0_19_0_1.hdf5',
