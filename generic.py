@@ -13,11 +13,12 @@ class GenericDataset(Dataset):
     '''
     def __init__(self,
         data,
+        dtype=torch.float32,
         device=None):
 
         self.covariates = {}
         for cov in list(data.keys()):
-            self.covariates[cov] = data[cov]
+            self.covariates[cov] = data[cov].to(dtype)
 
         if device is None:
             device = torch.device('cpu')
