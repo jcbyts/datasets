@@ -20,7 +20,7 @@ class FixationMultiDataset(Dataset):
         saccade_basis = None,
         max_fix_length: int=1000,
         download=True,
-        flatten=True,
+        flatten=False,
         crop_inds=None,
         spike_sorting='kilo',
         binarize_spikes=False,
