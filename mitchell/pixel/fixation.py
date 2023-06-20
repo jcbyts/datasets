@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 import torch
 from torch.utils.data import Dataset
 import numpy as np
@@ -5,7 +6,19 @@ import h5py
 import os
 from ...utils import downsample_time
 from .utils import get_stim_list, download_set, shift_im
+import dill
+from tqdm import tqdm
 
+class h5py_list(list):
+    def __getitem__(self, idx):
+        return h5py.File(super().__getitem__(idx), 'r')
+    def __setitem__(self, idx, val):
+        val = val.filename if type(val) is h5py.File else val
+        super().__setitem__(idx, val)
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+    
 class FixationMultiDataset(Dataset):
 
     def __init__(self,
@@ -47,7 +60,7 @@ class FixationMultiDataset(Dataset):
         self.shift = None # default shift to None. To provide shifts, set outside this class. Should be a list of shift values equal to size dataset.eyepos in every way
         self.add_noise = add_noise
         self.binarize_spikes = binarize_spikes
-
+        
         if self.saccade_basis is not None:
             if type(self.saccade_basis) is np.array:
                 self.saccadeB = self.saccade_basis
@@ -84,7 +97,7 @@ class FixationMultiDataset(Dataset):
                     print("Download is False. Exiting...")
 
         # open hdf5 files as a list of handles
-        self.fhandles = [h5py.File(os.path.join(dirname, fname), 'r') for fname in self.fnames]
+        self.fhandles = h5py_list([os.path.join(dirname, fname) for fname in self.fnames])
 
         # build index map
         self.file_index = [] # which file the fixation corresponds to
@@ -246,6 +259,8 @@ class FixationMultiDataset(Dataset):
                 self.crop_inds = [crop_inds[0], crop_inds[1], crop_inds[2], crop_inds[3]]
                 self.dims[1] = crop_inds[1]-crop_inds[0]
                 self.dims[2] = crop_inds[3]-crop_inds[2]
+                
+        self._nsamples = sum([len(self[i]['robs']) for i in range(len(self))])
 
     def __getitem__(self, index):
         """
@@ -565,3 +580,54 @@ class FixationMultiDataset(Dataset):
             torch.flatten(im2, start_dim=1)
 
         return im2
+    
+    def save(self, filename):
+        dill.dump(self.prepickle(), open(filename, 'wb'))
+        
+    @staticmethod
+    def load(filename):
+        return dill.load(open(filename, 'rb')).postpickle()
+    
+    def prepickle(self):
+        self.fhandles = [i.filename for i in self.fhandles]
+        return self
+    
+    def postpickle(self):
+        self.fhandles = [h5py.File(i, 'r') for i in self.fhandles]
+        return self
+    
+    def get_stas(self):
+        def time_embedding(x, num_lags):
+            # x is (time, n)
+            # output is (time - num_lags, num_lags, n)
+            out = torch.stack([x[i:i+num_lags] for i in range(x.shape[0] - num_lags)], dim=0)
+            return out.permute(0,2,1).reshape(len(out), -1)
+    
+        inds = self.get_stim_indices('Gabor')
+        xy = 0
+        ny = 0
+        for ind in tqdm(inds, smoothing=0):
+            data = self[ind]
+            x =  time_embedding(data['stim'].flatten(1), self.num_lags)
+            x=x**2
+            y = data['robs']*data['dfs']
+            y = y[self.num_lags:]
+            xy += (x.T@y).detach().cpu()
+            ny += (y.sum(dim=0)).detach().cpu()
+
+        stas = (xy/ny).reshape(self.dims[1:] + [self.num_lags] + [self.NC]).permute(2,0,1,3)
+
+        return stas
+    
+    def get_data(self, inds):
+        # return a dict including the data for every index in inds
+        data = {k: [] for k in self[0].keys()}
+        for ind in inds:
+            for k, v in self[ind].items():
+                data[k].append(self[ind][k])
+    
+    @property
+    def nsamples(self):
+        if self._nsamples is None:
+            self._nsamples = sum([len(i) for i in self])
+        return self._nsamples
