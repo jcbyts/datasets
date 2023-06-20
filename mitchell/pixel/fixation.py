@@ -257,10 +257,8 @@ class FixationMultiDataset(Dataset):
                 self.crop_inds = [0, self.dims[1], 0, self.dims[2]]
             else:
                 self.crop_inds = [crop_inds[0], crop_inds[1], crop_inds[2], crop_inds[3]]
-                self.dims[1] = crop_inds[1]-crop_inds[0]
-                self.dims[2] = crop_inds[3]-crop_inds[2]
-                
-        self._nsamples = sum([len(self[i]['robs']) for i in range(len(self))])
+                self.dims[1] = abs(crop_inds[1]-crop_inds[0])
+                self.dims[2] = abs(crop_inds[3]-crop_inds[2])
 
     def __getitem__(self, index):
         """
