@@ -259,7 +259,24 @@ class FixationMultiDataset(Dataset):
                 self.crop_inds = [crop_inds[0], crop_inds[1], crop_inds[2], crop_inds[3]]
                 self.dims[1] = abs(crop_inds[1]-crop_inds[0])
                 self.dims[2] = abs(crop_inds[3]-crop_inds[2])
-
+    
+    def block_inds_to_fix_inds(self, block_inds):
+        fix_finder = np.array([fix_i for fix_i, fix in enumerate(self.fixation_inds) for _ in fix], dtype=int)
+        flat_fix_inds = np.concatenate(self.fixation_inds)
+        inds = [file_ind for block_ind in block_inds for file_ind in self.block_inds[block_ind]]
+        out_inds = []
+        while inds:
+            fix_ind = np.where(flat_fix_inds == inds.pop(0))[0]
+            if len(fix_ind):
+                fix_ind = [fix_finder[i] for i in fix_ind]
+                for i in fix_ind:
+                    intersection = np.intersect1d(self.fixation_inds[i], inds)
+                    if len(intersection) >= len(self.fixation_inds[i])-50:
+                        out_inds.append(i)
+                        for ind in intersection:
+                            inds.remove(ind)
+        return out_inds
+        
     def __getitem__(self, index):
         """
         Get item for a Fixation dataset.
