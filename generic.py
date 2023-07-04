@@ -1,6 +1,7 @@
 
 import torch
 from torch.utils.data import Dataset
+import numpy as np
 
 
 class GenericDataset(Dataset):
@@ -41,3 +42,39 @@ class GenericDataset(Dataset):
 
     def __getitem__(self, index):
         return {cov: self.covariates[cov][index,...] for cov in self.cov_list}
+
+
+class ContiguousDataset(GenericDataset):
+    '''
+    Contiguous Dataset creates a pytorch dataset from a dictionary of tensors that serves contiguous blocks
+    Called the same way as GenericDataset, but with an additional "blocks" argument
+    
+    Inputs:
+        Data: Dictionary of tensors. Each key will be a covariate for the dataset.
+        device: Device to put each tensor on. Default is cpu.
+    '''
+
+    def __init__(self, data, blocks, dtype=torch.float32, device=None):
+        
+        super().__init__(data, dtype, device)
+
+        self.blocks = blocks
+    
+    def __len__(self):
+
+        return len(self.blocks)
+
+    def __getitem__(self, index):
+
+        if isinstance(index, int) or isinstance(index, np.int64):
+            index = [index]
+        elif isinstance(index, slice):
+            index = np.arange(index.start or 0, index.stop or len(self.blocks), index.step or 1)
+
+        inds = []
+        for i in index:
+            inds.append(torch.arange(self.blocks[i][0], self.blocks[i][1])) #, device=self.device
+        
+        inds = torch.cat(inds)
+
+        return {cov: self.covariates[cov][inds,...] for cov in self.cov_list}
