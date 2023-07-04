@@ -38,6 +38,7 @@ class FixationMultiDataset(Dataset):
         spike_sorting='kilo',
         binarize_spikes=False,
         min_fix_length: int=50,
+        max_block_length: int=1000,
         valid_eye_rad=5.2,
         add_noise=0,
         use_blocks=False,
@@ -56,6 +57,7 @@ class FixationMultiDataset(Dataset):
         self.num_lags_pre_sac = num_lags_pre_sac
         self.normalizing_constant = 50
         self.max_fix_length = max_fix_length
+        self.max_block_length = max_block_length
         self.saccade_basis = saccade_basis
         self.shift = None # default shift to None. To provide shifts, set outside this class. Should be a list of shift values equal to size dataset.eyepos in every way
         self.add_noise = add_noise
@@ -169,6 +171,21 @@ class FixationMultiDataset(Dataset):
                     # get blocks (start, stop) of valid samples
                     num_blocks = fhandle[stim][stimset]['blocks'].shape[1]
                     blocks = fhandle[stim][stimset]['blocks'][:,:]
+                    ctr = 1
+                    while ctr < num_blocks:
+                        b0 = int(blocks[0,ctr])
+                        b1 = int(blocks[1,ctr])-1
+                        # print(ctr, b1-b0)
+                        if (b1 - b0) > max_block_length:
+                            # print('splitting block %d' %ctr)
+                            # split block
+                            blocks[1,ctr] = b0 + max_block_length
+                            # print(blocks[:,ctr])
+                            blocks = np.concatenate([blocks[:,:ctr+1], np.array([b0+max_block_length, b1])[:,None], blocks[:,ctr+1:]], axis=1)
+                            num_blocks += 1
+                        ctr += 1
+
+
                     for bb in range(num_blocks):
                         b0 = int(blocks[0,bb])
                         b1 = int(blocks[1,bb])-1
@@ -253,12 +270,21 @@ class FixationMultiDataset(Dataset):
                             self.file_index.append(f) # which datafile does the fixation correspond to
                             self.stim_index.append(s) # which stimulus does the fixation correspond to
             
+            from copy import deepcopy
+            self.orig_dims = deepcopy(self.dims)
             if crop_inds is None:
                 self.crop_inds = [0, self.dims[1], 0, self.dims[2]]
             else:
                 self.crop_inds = [crop_inds[0], crop_inds[1], crop_inds[2], crop_inds[3]]
-                self.dims[1] = abs(crop_inds[1]-crop_inds[0])
-                self.dims[2] = abs(crop_inds[3]-crop_inds[2])
+                if crop_inds[1]<0:
+                    self.dims[1] = self.orig_dims[1] - crop_inds[0] - np.abs(crop_inds[1])
+                else:
+                    self.dims[1] = crop_inds[1]-crop_inds[0]
+                
+                if crop_inds[3]<0:
+                    self.dims[2] = self.orig_dims[2] - crop_inds[2] - np.abs(crop_inds[3])
+                else:
+                    self.dims[2] = crop_inds[3]-crop_inds[2]
 
     def __getitem__(self, index):
         """
@@ -613,7 +639,8 @@ class FixationMultiDataset(Dataset):
             xy += (x.T@y).detach().cpu()
             ny += (y.sum(dim=0)).detach().cpu()
 
-        stas = (xy/ny).reshape(self.dims[1:] + [self.num_lags] + [self.NC]).permute(2,0,1,3)
+        stas = (xy/ny)
+        # stas = stas.reshape(self.dims[1:] + [self.num_lags] + [self.NC]).permute(2,0,1,3)
 
         return stas
     
