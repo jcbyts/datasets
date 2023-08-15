@@ -79,7 +79,8 @@ def get_stim_url(id):
             '20200304': 'https://www.dropbox.com/s/5tj5m2rp0wht8z2/logan_20200304_-20_-10_50_60_0_19_0_1.hdf5?dl=1',
             '20200304C': 'https://www.dropbox.com/s/gwjcqzh7muh2q7q/logan_20200304_-31_-2_49_78_1_1_1_19_0_0.hdf5?dl=1',
             '20220601': 'https://www.dropbox.com/s/v85m0b9kzwiowqm/allen_20220601_-80_-50_10_50_1_0_19_0_1.hdf5?dl=1',
-            '20220610': 'https://www.dropbox.com/s/0tkwqlfjdarkrqm/allen_20220610_-80_-50_10_50_1_0_1_19_0_1.hdf5?dl=1'
+            '20220610': 'https://www.dropbox.com/s/0tkwqlfjdarkrqm/allen_20220610_-80_-50_10_50_1_0_1_19_0_1.hdf5?dl=1',
+            '20200304B': 'https://www.dropbox.com/scl/fi/278v990md2oriu8u4km33/logan_20200304_-66_-37__84_113_1_0_1_41_0_0_1.hdf5?rlkey=ws5480sdfcgc10b0m4w07umwg&dl=1'
         }
     
     if id not in urlpath.keys():
