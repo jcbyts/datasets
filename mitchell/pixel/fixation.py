@@ -657,7 +657,7 @@ class FixationMultiDataset(Dataset):
             ny += (y.sum(dim=0)).detach().cpu()
 
         stas = (xy/ny)
-        # stas = stas.reshape(self.dims[1:] + [self.num_lags] + [self.NC]).permute(2,0,1,3)
+        stas = stas.reshape(self.dims[1:] + [self.num_lags] + [self.NC]).permute(2,0,1,3)
 
         return stas
     
