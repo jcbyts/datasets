@@ -18,6 +18,46 @@ class h5py_list(list):
     def __iter__(self):
         for i in range(len(self)):
             yield self[i]
+
+def shift_stim(stim, shift,size,mode='bilinear'):
+    '''
+    This function samples a grid of size (size[0], size[1]) from the stimulus at the locations
+    specified by shift. The shift is in pixels and is a 2D vector. The output is a tensor of size
+    (stim.shape[0], stim.shape[1], size[0], size[1]) and the grid is returned as a tensor of size
+    (stim.shape[0], size[0], size[1], 2) so that it can be used with grid_sample (or diplayed for
+    animations that we should make to demo how this all works)
+
+    Inputs:
+        stim: torch.tensor of size (stim.shape[0], stim.shape[1], stim.shape[2], stim.shape[3]) 
+            where the first dimension is the batch dimension
+        shift: torch.tensor of size (stim.shape[0], 2) where the second dimension is the x and y
+            shift in pixels
+        size: list of length 2 specifying the size of the output grid (in pixels)
+        mode: string specifying the interpolation mode for grid_sample (default is bilinear)
+    
+    Outputs:
+        Image: torch.tensor of size (stim.shape[0], stim.shape[1], size[0], size[1]) where the first
+            dimension is the batch dimension
+        Grid: torch.tensor of size (stim.shape[0], size[0], size[1], 2) where the last dimension is
+            the x and y coordinates of the grid
+    '''
+    
+    import torch.nn.functional as F
+    dy, dx = torch.meshgrid(torch.arange(size[0])-size[0]/2, torch.arange(size[1])-size[1]/2)
+    scalex = (stim.shape[2]/2)
+    scaley = (stim.shape[3]/2)
+    dx = dx / scalex
+    dy = dy / scaley
+    dx = dx.unsqueeze(0).unsqueeze(-1)
+    dy = dy.unsqueeze(0).unsqueeze(-1)
+
+    sx = shift[:,0].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)/scalex
+    sy = shift[:,1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)/scaley
+
+    grid = torch.cat((dx+sx, dy+sy), dim=-1)
+
+    return F.grid_sample(stim, grid, mode=mode, align_corners=False), grid
+
     
 class FixationMultiDataset(Dataset):
 
@@ -389,6 +429,28 @@ class FixationMultiDataset(Dataset):
         
         I = I[...,self.crop_inds[0]:self.crop_inds[1],self.crop_inds[2]:self.crop_inds[3]]
         return I
+    
+    def _bin_spikes_at_times(self, file, times):
+        """ BIN SPIKES AT TIMES """
+
+
+        spike_inds = np.where(np.logical_and(
+            self.fhandles[file]['Neurons'][self.spike_sorting]['times']>=times[0],
+            self.fhandles[file]['Neurons'][self.spike_sorting]['times']<=times[-1]+0.01)
+            )[1]
+
+        st = self.fhandles[file]['Neurons'][self.spike_sorting]['times'][0,spike_inds]
+        clu = self.fhandles[file]['Neurons'][self.spike_sorting]['cluster'][0,spike_inds].astype(int)
+        # only keep spikes that are in the requested cluster ids list
+        ix = np.in1d(clu, self.unit_ids_orig[file])
+        st = st[ix]
+        clu = clu[ix]
+        # map cluster id to a unit number
+        clu = self.unit_id_map[file][clu]
+
+        robs_tmp = torch.sparse_coo_tensor( np.asarray([np.digitize(st, times)-1, clu]),
+                np.ones(len(clu)), (len(times), self.NC) , dtype=torch.float32)
+        return robs_tmp.to_dense()
 
     def _get_robs(self, file, stimix, inds):
         # NOTE: normally this would look just like the line above, but for 'Robs', but I am operating with spike times here
@@ -402,29 +464,30 @@ class FixationMultiDataset(Dataset):
         frames = torch.tensor(frame_times, dtype=torch.float32)
         frame_times = frame_times.flatten()
 
-        spike_inds = np.where(np.logical_and(
-            self.fhandles[file]['Neurons'][self.spike_sorting]['times']>=frame_times[0],
-            self.fhandles[file]['Neurons'][self.spike_sorting]['times']<=frame_times[-1]+0.01)
-            )[1]
+        robs_tmp = self._bin_spikes_at_times(file, frame_times)
+        # spike_inds = np.where(np.logical_and(
+        #     self.fhandles[file]['Neurons'][self.spike_sorting]['times']>=frame_times[0],
+        #     self.fhandles[file]['Neurons'][self.spike_sorting]['times']<=frame_times[-1]+0.01)
+        #     )[1]
 
-        st = self.fhandles[file]['Neurons'][self.spike_sorting]['times'][0,spike_inds]
-        clu = self.fhandles[file]['Neurons'][self.spike_sorting]['cluster'][0,spike_inds].astype(int)
-        # only keep spikes that are in the requested cluster ids list
-        ix = np.in1d(clu, self.unit_ids_orig[file])
-        st = st[ix]
-        clu = clu[ix]
-        # map cluster id to a unit number
-        clu = self.unit_id_map[file][clu]
+        # st = self.fhandles[file]['Neurons'][self.spike_sorting]['times'][0,spike_inds]
+        # clu = self.fhandles[file]['Neurons'][self.spike_sorting]['cluster'][0,spike_inds].astype(int)
+        # # only keep spikes that are in the requested cluster ids list
+        # ix = np.in1d(clu, self.unit_ids_orig[file])
+        # st = st[ix]
+        # clu = clu[ix]
+        # # map cluster id to a unit number
+        # clu = self.unit_id_map[file][clu]
         
-        # do the actual binning
-        # robs_tmp = bin_population(st, clu, frame_times, self.unit_ids[file], maxbsize=1.2/240)
+        # # do the actual binning
+        # # robs_tmp = bin_population(st, clu, frame_times, self.unit_ids[file], maxbsize=1.2/240)
         
-        # if self.downsample_t>1:
-        #     robs_tmp = downsample_time(robs_tmp, self.downsample_t, flipped=False)
+        # # if self.downsample_t>1:
+        # #     robs_tmp = downsample_time(robs_tmp, self.downsample_t, flipped=False)
 
-        robs_tmp = torch.sparse_coo_tensor( np.asarray([np.digitize(st, frame_times)-1, clu]),
-                np.ones(len(clu)), (len(frame_times), self.NC) , dtype=torch.float32)
-        robs_tmp = robs_tmp.to_dense()
+        # robs_tmp = torch.sparse_coo_tensor( np.asarray([np.digitize(st, frame_times)-1, clu]),
+        #         np.ones(len(clu)), (len(frame_times), self.NC) , dtype=torch.float32)
+        # robs_tmp = robs_tmp.to_dense()
 
         """ DATAFILTERS """
         nt = len(frame_times)
@@ -515,6 +578,35 @@ class FixationMultiDataset(Dataset):
         else:
             return len(self.fixation_inds)
 
+    def get_eyepos_interpolant(self, modifier=lambda x: x):
+        '''
+        This gets the raw eye trace, smooths it and builds an interpolant function that returns the 
+        eye position at any time.
+
+        Inputs:
+            modifier - a lambda function that modifies the eye position (e.g., smooths it)
+                default: lambda x: x (i.e., no modification)
+        Outputs:
+            feye - interpolant functions that return the x and y eye position at any time
+            e.g., Call feye(timesteps) and it will return the eye position as an N x 2 tensor
+
+        '''
+        # extract the eye position for the entire experiment and smooth it and build an interpolant
+        from scipy.interpolate import interp1d
+        
+        eyepos = self.fhandles[0]['ddpi']['eyeposDeg']
+        timestamps = self.fhandles[0]['ddpi']['timestamps'][:][0]
+
+        # first-order savgol filter fits a line to
+        ex = modifier(eyepos[0,:])
+        ey = modifier(eyepos[1,:])
+        
+        fx = interp1d(timestamps, ex, kind='linear')
+        fy = interp1d(timestamps, ey, kind='linear')
+        feye = lambda t: torch.cat((torch.tensor(fx(t), dtype=torch.float32), torch.tensor(-fy(t), dtype=torch.float32)), dim=1)
+        return feye
+
+
     def get_stim_indices(self, stim_name='Gabor'):
         if isinstance(stim_name, str):
             stim_name = [stim_name]
@@ -591,36 +683,36 @@ class FixationMultiDataset(Dataset):
         return shifters
     
 
-    def shift_stim(self, im, shift, unflatten=False):
-        """
-        apply shifter to translate stimulus as a function of the eye position
-        """
-        import torch.nn.functional as F
-        import torch
-        affine_trans = torch.tensor([[[1., 0., 0.], [0., 1., 0.]]])
-        sz = [im.shape[0]] + self.dims
+    # def shift_stim(self, im, shift, unflatten=False):
+    #     """
+    #     apply shifter to translate stimulus as a function of the eye position
+    #     """
+    #     import torch.nn.functional as F
+    #     import torch
+    #     affine_trans = torch.tensor([[[1., 0., 0.], [0., 1., 0.]]])
+    #     sz = [im.shape[0]] + self.dims
 
-        if len(im.shape)==2:
-            unflatten = True
-            im = im.reshape(sz)
+    #     if len(im.shape)==2:
+    #         unflatten = True
+    #         im = im.reshape(sz)
 
-        aff = torch.tensor([[1,0,0],[0,1,0]])
+    #     aff = torch.tensor([[1,0,0],[0,1,0]])
 
-        affine_trans = shift[:,:,None]+aff[None,:,:]
-        affine_trans[:,0,0] = 1
-        affine_trans[:,0,1] = 0
-        affine_trans[:,1,0] = 0
-        affine_trans[:,1,1] = 1
+    #     affine_trans = shift[:,:,None]+aff[None,:,:]
+    #     affine_trans[:,0,0] = 1
+    #     affine_trans[:,0,1] = 0
+    #     affine_trans[:,1,0] = 0
+    #     affine_trans[:,1,1] = 1
 
-        n = im.shape[0]
-        grid = F.affine_grid(affine_trans, torch.Size((n, 1, sz[-2], sz[-1])), align_corners=False)
+    #     n = im.shape[0]
+    #     grid = F.affine_grid(affine_trans, torch.Size((n, 1, sz[-2], sz[-1])), align_corners=False)
 
-        im2 = F.grid_sample(im, grid, align_corners=False)
+    #     im2 = F.grid_sample(im, grid, align_corners=False)
 
-        if unflatten:
-            torch.flatten(im2, start_dim=1)
+    #     if unflatten:
+    #         torch.flatten(im2, start_dim=1)
 
-        return im2
+    #     return im2
     
     def save(self, filename):
         dill.dump(self.prepickle(), open(filename, 'wb'))
