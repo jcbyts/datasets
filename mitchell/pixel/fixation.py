@@ -732,8 +732,8 @@ class FixationMultiDataset(Dataset):
     def get_stas(self):
         def time_embedding(x, num_lags):
             # x is (time, n)
-            # output is (time - num_lags, num_lags, n)
-            out = torch.stack([x[i:i+num_lags] for i in range(x.shape[0] - num_lags)], dim=0)
+            # output is (time - num_lags + 1, num_lags, n)
+            out = torch.stack([x[i:i+num_lags] for i in range(x.shape[0] - num_lags + 1)], dim=0)
             return out.permute(0,2,1).reshape(len(out), -1)
     
         inds = self.get_stim_indices('Gabor')
@@ -741,10 +741,11 @@ class FixationMultiDataset(Dataset):
         ny = 0
         for ind in tqdm(inds, smoothing=0):
             data = self[ind]
-            x =  time_embedding(data['stim'].flatten(1), self.num_lags)
+            if len(data['stim'])<self.num_lags:
+                continue
+            x = time_embedding(data['stim'].flatten(1), self.num_lags)
             x=x**2
-            y = data['robs']*data['dfs']
-            y = y[self.num_lags:]
+            y = data['robs'][self.num_lags-1:]*data['dfs'][self.num_lags-1:]
             xy += (x.T@y).detach().cpu()
             ny += (y.sum(dim=0)).detach().cpu()
 
