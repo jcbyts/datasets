@@ -2,7 +2,7 @@
 import torch
 from torch.utils.data import Dataset
 import numpy as np
-
+import tqdm
 
 class GenericDataset(Dataset):
     '''
@@ -78,3 +78,33 @@ class ContiguousDataset(GenericDataset):
         inds = torch.cat(inds)
 
         return {cov: self.covariates[cov][inds,...] for cov in self.cov_list}
+    
+    def fromDataset(ds, dtype=torch.float32, device=None):
+        blocks = []
+        stim = []
+        robs = []
+        eyepos = []
+        dfs = []
+        bstart = 0
+        print("building dataset")
+        for ii in tqdm(range(len(ds))):
+            batch = ds[ii]
+            stim.append(batch['stim'])
+            robs.append(batch['robs'])
+            eyepos.append(batch['eyepos'])
+            dfs.append(batch['dfs'])
+            bstop = bstart + batch['stim'].shape[0]
+            blocks.append((bstart, bstop))
+            bstart = bstop
+        stim = torch.cat(stim, dim=0)
+        robs = torch.cat(robs, dim=0)
+        eyepos = torch.cat(eyepos, dim=0)
+        dfs = torch.cat(dfs, dim=0)
+        d = {
+            "stim": stim,
+            "robs": robs,
+            "eyepos": eyepos,
+            "dfs": dfs,
+        }
+        return ContiguousDataset(d, blocks, dtype=dtype, device=device)
+        
