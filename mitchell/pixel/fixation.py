@@ -19,7 +19,7 @@ class h5py_list(list):
         for i in range(len(self)):
             yield self[i]
 
-def shift_stim(stim, shift,size,mode='bilinear'):
+def shift_stim(stim, shift, size,mode='bilinear'):
     '''
     This function samples a grid of size (size[0], size[1]) from the stimulus at the locations
     specified by shift. The shift is in pixels and is a 2D vector. The output is a tensor of size
