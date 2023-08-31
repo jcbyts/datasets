@@ -656,6 +656,63 @@ class FixationMultiDataset(Dataset):
 
         return shifters
     
+    def animate_block(self, inds, feye, fname='sample_block'):
+
+        ### Gif of sampled eye position overlaid
+        from matplotlib.animation import FuncAnimation
+        import imageio
+        import matplotlib.pyplot as plt
+
+        ppd = self.fhandles[0]['ddpi']['ppd'][0][0]
+        
+        data = self[inds]
+
+        # frametimes from this block
+        ft = data['frame_times']
+        exy = feye(ft) # sample eye position in d.v.a
+
+        # shift = the residuals of the measured eye position and the ROI center
+        shift = exy - data['eyepos']
+    # # shift = torch.stack((exy_ - data['eyepos'][:,0], -ey_ - data['eyepos'][:,1]), dim=0)
+        shift *= ppd # convert to pixels
+
+        # re-sample the stimulus at the shifted locations
+        I, G = self.shift_stim(data['stim'], shift, size=[70, 70], mode='bilinear')
+        # sample the stimulus at the ROI center (no shift)
+        # I2,G2 = self.shift_stim(data['stim'], 0*shift, size=[70, 70], mode='bilinear')
+
+        s = I.cpu().numpy()*self.normalizing_constant
+        # s = torch.cat((I, I2), dim=3).detach().cpu().numpy()*self.normalizing_constant
+        # Create a list of NumPy arrays representing frames
+        frames = [(s[i,0,:,:]+127).astype(np.uint8) for i in range(s.shape[0])]
+
+        # Define the output GIF filename
+        output_filename = 'figures/' + fname + '.gif'
+        # Save the frames as a GIF
+        imageio.mimsave(output_filename, frames)
+
+        ### animate movie of how it was sampled
+        fig = plt.figure(figsize=(5,5))
+        ax = plt.subplot(1,1,1)
+        frame = 0
+        ax.imshow(data['stim'][frame,0,:,:]*self.normalizing_constant, interpolation='none', cmap='gray', vmin=-127, vmax=127, extent=[-1,1,-1,1])
+        ax.scatter(G[frame,:,:,0].mean(), G[frame,:,:,1].mean(), color='b')
+        ax.scatter(G[frame,:,:,0], G[frame,:,:,1], color='r', s=.05)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        nsteps = data['stim'].shape[0]
+
+        def animate(frame):
+            ax.clear()
+            ax.imshow(data['stim'][frame,0,:,:]*self.normalizing_constant, interpolation='none', cmap='gray', vmin=-127, vmax=127, extent=[-1,1,-1,1])
+            ax.scatter(G[frame,:,:,0].mean(), G[frame,:,:,1].mean(), color='b')
+            ax.scatter(G[frame,:,:,0], G[frame,:,:,1], color='r', s=.05)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        anim = FuncAnimation(fig, animate, frames=nsteps, interval=200)
+        anim.save('figures/' + fname + '.mp4', dpi=100, fps=60)
    
 
     # def shift_stim(self, im, shift, unflatten=False):
