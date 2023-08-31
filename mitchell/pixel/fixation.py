@@ -19,45 +19,6 @@ class h5py_list(list):
         for i in range(len(self)):
             yield self[i]
 
-def shift_stim(stim, shift, size,mode='bilinear'):
-    '''
-    This function samples a grid of size (size[0], size[1]) from the stimulus at the locations
-    specified by shift. The shift is in pixels and is a 2D vector. The output is a tensor of size
-    (stim.shape[0], stim.shape[1], size[0], size[1]) and the grid is returned as a tensor of size
-    (stim.shape[0], size[0], size[1], 2) so that it can be used with grid_sample (or diplayed for
-    animations that we should make to demo how this all works)
-
-    Inputs:
-        stim: torch.tensor of size (stim.shape[0], stim.shape[1], stim.shape[2], stim.shape[3]) 
-            where the first dimension is the batch dimension
-        shift: torch.tensor of size (stim.shape[0], 2) where the second dimension is the x and y
-            shift in pixels
-        size: list of length 2 specifying the size of the output grid (in pixels)
-        mode: string specifying the interpolation mode for grid_sample (default is bilinear)
-    
-    Outputs:
-        Image: torch.tensor of size (stim.shape[0], stim.shape[1], size[0], size[1]) where the first
-            dimension is the batch dimension
-        Grid: torch.tensor of size (stim.shape[0], size[0], size[1], 2) where the last dimension is
-            the x and y coordinates of the grid
-    '''
-    
-    import torch.nn.functional as F
-    dy, dx = torch.meshgrid(torch.arange(size[0])-size[0]/2, torch.arange(size[1])-size[1]/2)
-    scalex = (stim.shape[2]/2)
-    scaley = (stim.shape[3]/2)
-    dx = dx / scalex
-    dy = dy / scaley
-    dx = dx.unsqueeze(0).unsqueeze(-1)
-    dy = dy.unsqueeze(0).unsqueeze(-1)
-
-    sx = shift[:,0].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)/scalex
-    sy = shift[:,1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)/scaley
-
-    grid = torch.cat((dx+sx, dy+sy), dim=-1)
-
-    return F.grid_sample(stim, grid, mode=mode, align_corners=False), grid
-
     
 class FixationMultiDataset(Dataset):
 
@@ -578,7 +539,7 @@ class FixationMultiDataset(Dataset):
         else:
             return len(self.fixation_inds)
 
-    def get_eyepos_interpolant(self, modifier=lambda x: x):
+    def get_eyepos_interpolant(self, modifier=lambda x: x, beta=1.0):
         '''
         This gets the raw eye trace, smooths it and builds an interpolant function that returns the 
         eye position at any time.
@@ -586,6 +547,9 @@ class FixationMultiDataset(Dataset):
         Inputs:
             modifier - a lambda function that modifies the eye position (e.g., smooths it)
                 default: lambda x: x (i.e., no modification)
+            beta - a number between 0 and 1 that mixes between the ROI center and the smoothed eye trace
+                1.0 = measured eye position (this is the default)
+                0.0 = ROI center (no FEMs)
         Outputs:
             feye - interpolant functions that return the x and y eye position at any time
             e.g., Call feye(timesteps) and it will return the eye position as an N x 2 tensor
@@ -601,9 +565,19 @@ class FixationMultiDataset(Dataset):
         ex = modifier(eyepos[0,:])
         ey = modifier(eyepos[1,:])
         
-        fx = interp1d(timestamps, ex, kind='linear')
-        fy = interp1d(timestamps, ey, kind='linear')
-        feye = lambda t: torch.cat((torch.tensor(fx(t), dtype=torch.float32), torch.tensor(-fy(t), dtype=torch.float32)), dim=1)
+        fx = interp1d(timestamps, ex, kind='linear', fill_value="extrapolate")
+        fy = interp1d(timestamps, -ey, kind='linear', fill_value="extrapolate")
+
+        if beta > 0.99:
+            feye = lambda t: torch.cat((torch.tensor(fx(t), dtype=torch.float32), torch.tensor(fy(t), dtype=torch.float32)), dim=1)
+        else:
+            data = self[:]
+            roictr = data['eyepos'].numpy()
+            ft = data['frame_times'].numpy()
+            fx0 = interp1d(ft.flatten(), roictr[:,0].flatten(), kind='linear', fill_value="extrapolate")
+            fy0 = interp1d(ft.flatten(), roictr[:,1].flatten(), kind='linear', fill_value="extrapolate")
+
+            feye = lambda t: torch.cat((torch.tensor(beta*fx(t) + (1-beta)*fx0(t), dtype=torch.float32), torch.tensor(beta*fy(t) + (1-beta)*fy0(t), dtype=torch.float32)), dim=1)
         return feye
 
 
@@ -682,6 +656,7 @@ class FixationMultiDataset(Dataset):
 
         return shifters
     
+   
 
     # def shift_stim(self, im, shift, unflatten=False):
     #     """
@@ -766,3 +741,44 @@ class FixationMultiDataset(Dataset):
         if self._nsamples is None:
             self._nsamples = sum([len(i) for i in self])
         return self._nsamples
+
+    @staticmethod
+    def shift_stim(stim, shift, size, mode='bilinear'):
+        '''
+        This function samples a grid of size (size[0], size[1]) from the stimulus at the locations
+        specified by shift. The shift is in pixels and is a 2D vector. The output is a tensor of size
+        (stim.shape[0], stim.shape[1], size[0], size[1]) and the grid is returned as a tensor of size
+        (stim.shape[0], size[0], size[1], 2) so that it can be used with grid_sample (or diplayed for
+        animations that we should make to demo how this all works)
+
+        Inputs:
+            stim: torch.tensor of size (stim.shape[0], stim.shape[1], stim.shape[2], stim.shape[3]) 
+                where the first dimension is the batch dimension
+            shift: torch.tensor of size (stim.shape[0], 2) where the second dimension is the x and y
+                shift in pixels
+            size: list of length 2 specifying the size of the output grid (in pixels)
+            mode: string specifying the interpolation mode for grid_sample (default is bilinear)
+        
+        Outputs:
+            Image: torch.tensor of size (stim.shape[0], stim.shape[1], size[0], size[1]) where the first
+                dimension is the batch dimension
+            Grid: torch.tensor of size (stim.shape[0], size[0], size[1], 2) where the last dimension is
+                the x and y coordinates of the grid
+        '''
+        
+        import torch.nn.functional as F
+        dy, dx = torch.meshgrid(torch.arange(size[0])-size[0]/2, torch.arange(size[1])-size[1]/2)
+        scalex = (stim.shape[2]/2)
+        scaley = (stim.shape[3]/2)
+        dx = dx / scalex
+        dy = dy / scaley
+        dx = dx.unsqueeze(0).unsqueeze(-1)
+        dy = dy.unsqueeze(0).unsqueeze(-1)
+
+        sx = shift[:,0].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)/scalex
+        sy = shift[:,1].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)/scaley
+
+        grid = torch.cat((dx+sx, dy+sy), dim=-1)
+
+        return F.grid_sample(stim, grid, mode=mode, align_corners=False), grid
+    
